@@ -8,6 +8,11 @@ pthread_mutex_t SS4S_NDL_webOS5_Lock = PTHREAD_MUTEX_INITIALIZER;
 bool SS4S_NDL_webOS5_Initialized = false;
 SS4S_LoggingFunction *SS4S_NDL_webOS5_Log = NULL;
 const SS4S_LibraryContext *SS4S_NDL_webOS5_Lib = NULL;
+SS4S_NDL_webOS5_ConfigT SS4S_NDL_webOS5_Config = {
+        .lowLatency = false,
+        .maxQueueFrames = 30,
+        .frameDropThreshold = -1,
+};
 
 SS4S_EXPORTED bool SS4S_ModuleOpen_NDL_WEBOS5(SS4S_Module *module, const SS4S_LibraryContext *context) {
     (void) context;

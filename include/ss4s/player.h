@@ -49,6 +49,14 @@ void *SS4S_PlayerGetUserdata(SS4S_Player *player);
 
 bool SS4S_PlayerGetVideoLatency(SS4S_Player *player, int avgIntervalUs, int *latencyUs);
 
+/**
+ * Get the number of frames currently queued in the decoder/renderer, as last reported by the video module.
+ * @param player Player instance
+ * @param queueDepth Queue depth field to assign
+ * @return true if the module has reported a queue depth, false otherwise
+ */
+bool SS4S_PlayerGetVideoQueueDepth(SS4S_Player *player, int *queueDepth);
+
 #ifdef __cplusplus
 }
 #endif

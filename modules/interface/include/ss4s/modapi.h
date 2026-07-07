@@ -134,6 +134,7 @@ typedef struct SS4S_LibraryContext {
         SS4S_VideoStatsBeginFrameFunction *BeginFrame;
         SS4S_VideoStatsEndFrameFunction *EndFrame;
         SS4S_VideoStatsReportFrameFunction *ReportFrame;
+        SS4S_VideoStatsReportQueueDepthFunction *ReportQueueDepth;
     } VideoStats;
 } SS4S_LibraryContext;
 

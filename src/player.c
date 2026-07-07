@@ -123,3 +123,14 @@ bool SS4S_PlayerGetVideoLatency(SS4S_Player *player, int avgIntervalUs, int *lat
     *latencyUs = result;
     return true;
 }
+
+bool SS4S_PlayerGetVideoQueueDepth(SS4S_Player *player, int *queueDepth) {
+    assert(player != NULL);
+    SS4S_MutexLock(player->mutex);
+    bool valid = player->stats.videoQueueDepthValid;
+    if (valid) {
+        *queueDepth = player->stats.videoQueueDepth;
+    }
+    SS4S_MutexUnlock(player->mutex);
+    return valid;
+}

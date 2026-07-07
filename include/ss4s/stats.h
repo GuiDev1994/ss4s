@@ -13,6 +13,8 @@ typedef void(SS4S_VideoStatsEndFrameFunction)(SS4S_Player *player, uint32_t begi
 
 typedef void(SS4S_VideoStatsReportFrameFunction)(SS4S_Player *player, uint32_t frameLatencyUs);
 
+typedef void(SS4S_VideoStatsReportQueueDepthFunction)(SS4S_Player *player, int queueDepth);
+
 #ifdef __cplusplus
 }
 #endif

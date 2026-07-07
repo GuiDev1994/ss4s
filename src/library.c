@@ -43,6 +43,7 @@ int SS4S_Init(int argc, char *argv[], const SS4S_Config *config) {
     SS4S_LibContext.VideoStats.BeginFrame = SS4S_VideoStatsBeginFrame;
     SS4S_LibContext.VideoStats.EndFrame = SS4S_VideoStatsEndFrame;
     SS4S_LibContext.VideoStats.ReportFrame = SS4S_VideoStatsReportFrame;
+    SS4S_LibContext.VideoStats.ReportQueueDepth = SS4S_VideoStatsReportQueueDepth;
     SS4S_Module module;
     if (config->audioDriver != NULL) {
         SS4S_Log(SS4S_LogLevelInfo, "Audio", "Opening driver %s", config->audioDriver);
@@ -133,6 +134,13 @@ void SS4S_VideoStatsEndFrame(SS4S_Player *player, uint32_t beginFrameResult) {
 void SS4S_VideoStatsReportFrame(SS4S_Player *player, uint32_t latencyUs) {
     SS4S_MutexLockEx(player->mutex, NULL);
     SS4S_StatsCounterReportFrame(&player->stats.video, latencyUs);
+    SS4S_MutexUnlockEx(player->mutex, NULL);
+}
+
+void SS4S_VideoStatsReportQueueDepth(SS4S_Player *player, int queueDepth) {
+    SS4S_MutexLockEx(player->mutex, NULL);
+    player->stats.videoQueueDepth = queueDepth;
+    player->stats.videoQueueDepthValid = true;
     SS4S_MutexUnlockEx(player->mutex, NULL);
 }
 

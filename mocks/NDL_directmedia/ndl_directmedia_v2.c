@@ -50,6 +50,27 @@ int NDL_DirectVideoGetRenderBufferLength(int *length) {
     return 0;
 }
 
+int NDL_DirectVideoFlushRenderBuffer(void) {
+    mock_ndl_lock(__func__);
+    if (!video_opened) {
+        mock_ndl_unlock(__func__);
+        return -1;
+    }
+    mock_ndl_unlock(__func__);
+    return 0;
+}
+
+int NDL_DirectVideoSetFrameDropThreshold(int threshold) {
+    (void) threshold;
+    mock_ndl_lock(__func__);
+    if (!video_opened) {
+        mock_ndl_unlock(__func__);
+        return -1;
+    }
+    mock_ndl_unlock(__func__);
+    return 0;
+}
+
 int NDL_DirectVideoSetHDRInfo(NDL_DIRECTVIDEO_HDR_INFO_T hdrInfo) {
     (void) hdrInfo;
     mock_ndl_lock(__func__);

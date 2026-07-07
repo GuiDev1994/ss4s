@@ -1,4 +1,5 @@
 #include <string.h>
+#include <dlfcn.h>
 #include "ndl_common.h"
 #include "highend_check.h"
 #include "max_res.h"
@@ -6,6 +7,24 @@
 static SS4S_VideoOpenResult ReloadWithSize(SS4S_PlayerContext *context, int width, int height);
 
 static uint64_t GetTimeUs();
+
+/* NDL_DirectVideoFlushRenderBuffer may be missing on older webOS versions, resolve it at runtime */
+static int FlushRenderBuffer() {
+    static int (*flushFn)(void) = NULL;
+    static bool resolved = false;
+    if (!resolved) {
+        flushFn = dlsym(RTLD_DEFAULT, "NDL_DirectVideoFlushRenderBuffer");
+        resolved = true;
+        if (flushFn == NULL) {
+            SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL",
+                                "NDL_DirectVideoFlushRenderBuffer is not available on this platform");
+        }
+    }
+    if (flushFn == NULL) {
+        return -1;
+    }
+    return flushFn();
+}
 
 static bool GetCapabilities(SS4S_VideoCapabilities *capabilities) {
     capabilities->codecs = SS4S_VIDEO_H264 | SS4S_VIDEO_H265 | SS4S_VIDEO_VP9 | SS4S_VIDEO_AV1;
@@ -70,6 +89,13 @@ static SS4S_VideoOpenResult OpenVideo(const SS4S_VideoInfo *info, const SS4S_Vid
     return result;
 }
 
+/* Smoothing factor for the feed interval and play duration EMAs */
+#define FEED_EMA_ALPHA 0.1f
+/* Minimum interval between decoder saturation warnings, in microseconds */
+#define SATURATION_LOG_INTERVAL_US 5000000
+/* How long the render queue must stay above the threshold before the watchdog flushes, in microseconds */
+#define QUEUE_OVERLOAD_GRACE_US 500000
+
 static SS4S_VideoFeedResult FeedVideo(SS4S_VideoInstance *instance, const unsigned char *data, size_t size,
                                       SS4S_VideoFeedFlags flags) {
     (void) flags;
@@ -78,20 +104,72 @@ static SS4S_VideoFeedResult FeedVideo(SS4S_VideoInstance *instance, const unsign
         return SS4S_VIDEO_FEED_NOT_READY;
     }
     uint64_t pts = SS4S_NDL_webOS5_GetPts(context);
+    uint64_t playStart = GetTimeUs();
     int rc = NDL_DirectVideoPlay((void *) data, size, (long long) pts);
+    uint64_t now = GetTimeUs();
     if (rc != 0) {
         SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL", "NDL_DirectVideoPlay returned %d: %s", rc,
                             NDL_DirectMediaGetError());
         return SS4S_VIDEO_FEED_ERROR;
     }
-    uint64_t now = GetTimeUs();
-    int renderBufferLength = 0;
-    if (context->lastFrameTime > 0 && NDL_DirectVideoGetRenderBufferLength(&renderBufferLength) == 0) {
-        float bufLen = renderBufferLength > 0 ? (float) renderBufferLength : 0.5f;
-        float latency = bufLen * (float) (now - context->lastFrameTime);
-        SS4S_NDL_webOS5_Lib->VideoStats.ReportFrame(context->player, (int) latency);
+    float playDuration = (float) (now - playStart);
+    if (context->avgPlayDurationUs <= 0) {
+        context->avgPlayDurationUs = playDuration;
+    } else {
+        context->avgPlayDurationUs += FEED_EMA_ALPHA * (playDuration - context->avgPlayDurationUs);
+    }
+    int renderBufferLength = -1;
+    if (NDL_DirectVideoGetRenderBufferLength(&renderBufferLength) != 0) {
+        renderBufferLength = -1;
+    }
+    if (context->lastFrameTime > 0) {
+        float interval = (float) (now - context->lastFrameTime);
+        if (context->avgFrameIntervalUs <= 0) {
+            context->avgFrameIntervalUs = interval;
+        } else {
+            context->avgFrameIntervalUs += FEED_EMA_ALPHA * (interval - context->avgFrameIntervalUs);
+        }
+        if (renderBufferLength >= 0) {
+            /* Estimate latency as the queue depth times the average feed interval. An empty queue is counted
+             * as half a frame since the current frame is somewhere between decode and display. */
+            float bufLen = renderBufferLength > 0 ? (float) renderBufferLength : 0.5f;
+            float latency = bufLen * context->avgFrameIntervalUs;
+            SS4S_NDL_webOS5_Lib->VideoStats.ReportFrame(context->player, (uint32_t) latency);
+        }
+        /* If NDL_DirectVideoPlay itself takes longer than the frame interval on average,
+         * the decoder can't keep up with the incoming frame rate. */
+        if (context->avgFrameIntervalUs > 0 && context->avgPlayDurationUs > context->avgFrameIntervalUs &&
+            now - context->lastSaturationLogUs > SATURATION_LOG_INTERVAL_US) {
+            context->lastSaturationLogUs = now;
+            SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL",
+                                "Decoder saturated: NDL_DirectVideoPlay takes %.0f us on average, "
+                                "but frames arrive every %.0f us",
+                                context->avgPlayDurationUs, context->avgFrameIntervalUs);
+        }
+    }
+    if (renderBufferLength >= 0 && SS4S_NDL_webOS5_Lib->VideoStats.ReportQueueDepth != NULL) {
+        SS4S_NDL_webOS5_Lib->VideoStats.ReportQueueDepth(context->player, renderBufferLength);
     }
     context->lastFrameTime = now;
+    /* Low latency watchdog: when the render queue stays above the configured depth for longer than
+     * the grace period, flush the queued frames and ask the host for an IDR frame. */
+    if (SS4S_NDL_webOS5_Config.lowLatency && renderBufferLength >= 0) {
+        if (renderBufferLength > SS4S_NDL_webOS5_Config.maxQueueFrames) {
+            if (context->queueOverloadSinceUs == 0) {
+                context->queueOverloadSinceUs = now;
+            } else if (now - context->queueOverloadSinceUs > QUEUE_OVERLOAD_GRACE_US) {
+                context->queueOverloadSinceUs = 0;
+                int flushRc = FlushRenderBuffer();
+                SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL",
+                                    "Render queue stuck at %d frames (limit %d), flushed (rc=%d) and "
+                                    "requesting keyframe", renderBufferLength,
+                                    SS4S_NDL_webOS5_Config.maxQueueFrames, flushRc);
+                return SS4S_VIDEO_FEED_REQUEST_KEYFRAME;
+            }
+        } else {
+            context->queueOverloadSinceUs = 0;
+        }
+    }
     return SS4S_VIDEO_FEED_OK;
 }
 

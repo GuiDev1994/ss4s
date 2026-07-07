@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <string.h>
+#include <dlfcn.h>
 
 #include "opus_empty.h"
 
@@ -23,6 +24,10 @@ const SS4S_PlayerDriver SS4S_NDL_webOS5_PlayerDriver = {
 static int UnloadMedia(SS4S_PlayerContext *context);
 
 static int LoadMedia(SS4S_PlayerContext *context);
+
+static void LoadConfigFromEnv();
+
+static void ApplyFrameDropThreshold();
 
 static void LoadCallback(int type, long long numValue, const char *strValue);
 
@@ -77,6 +82,46 @@ static int UnloadMedia(SS4S_PlayerContext *context) {
     return ret;
 }
 
+/* Read tuning options from the environment on every media load, so the app can change them between sessions. */
+static void LoadConfigFromEnv() {
+    const char *value = getenv("SS4S_NDL_LOW_LATENCY");
+    SS4S_NDL_webOS5_Config.lowLatency = value != NULL && value[0] == '1';
+    SS4S_NDL_webOS5_Config.maxQueueFrames = 30;
+    if ((value = getenv("SS4S_NDL_MAX_QUEUE_FRAMES")) != NULL) {
+        int parsed = (int) strtol(value, NULL, 10);
+        if (parsed > 0) {
+            SS4S_NDL_webOS5_Config.maxQueueFrames = parsed;
+        }
+    }
+    SS4S_NDL_webOS5_Config.frameDropThreshold = -1;
+    if ((value = getenv("SS4S_NDL_FRAME_DROP_THRESHOLD")) != NULL) {
+        SS4S_NDL_webOS5_Config.frameDropThreshold = (int) strtol(value, NULL, 10);
+    }
+    if (SS4S_NDL_webOS5_Config.lowLatency) {
+        SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "Low latency mode enabled: maxQueueFrames=%d, "
+                                                      "frameDropThreshold=%d",
+                            SS4S_NDL_webOS5_Config.maxQueueFrames, SS4S_NDL_webOS5_Config.frameDropThreshold);
+    }
+}
+
+/* NDL_DirectVideoSetFrameDropThreshold is not present on all webOS versions, resolve it at runtime.
+ * The units of the threshold value are undocumented, so it's only applied when explicitly configured. */
+static void ApplyFrameDropThreshold() {
+    if (SS4S_NDL_webOS5_Config.frameDropThreshold < 0) {
+        return;
+    }
+    int (*setFrameDropThreshold)(int) = dlsym(RTLD_DEFAULT, "NDL_DirectVideoSetFrameDropThreshold");
+    if (setFrameDropThreshold == NULL) {
+        SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL",
+                            "NDL_DirectVideoSetFrameDropThreshold is not available on this platform");
+        return;
+    }
+    int rc = setFrameDropThreshold(SS4S_NDL_webOS5_Config.frameDropThreshold);
+    SS4S_NDL_webOS5_Log(rc == 0 ? SS4S_LogLevelInfo : SS4S_LogLevelWarn, "NDL",
+                        "NDL_DirectVideoSetFrameDropThreshold(%d) returned %d",
+                        SS4S_NDL_webOS5_Config.frameDropThreshold, rc);
+}
+
 static int LoadMedia(SS4S_PlayerContext *context) {
     int ret;
     if (!SS4S_NDL_webOS5_Initialized) {
@@ -99,6 +144,7 @@ static int LoadMedia(SS4S_PlayerContext *context) {
         SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "Defer LoadMedia because audio or video has no type");
         return 0;
     }
+    LoadConfigFromEnv();
     SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "NDL_DirectMediaLoad(video=%u (%d*%d), atype=%u)", info.video.type,
                         info.video.width, info.video.height, info.audio.type);
     if ((ret = NDL_DirectMediaLoad(&info, LoadCallback)) != 0) {
@@ -106,6 +152,13 @@ static int LoadMedia(SS4S_PlayerContext *context) {
                             NDL_DirectMediaGetError());
         return ret;
     }
+    if (info.video.type != 0) {
+        ApplyFrameDropThreshold();
+    }
+    context->lastFrameTime = 0;
+    context->avgFrameIntervalUs = 0;
+    context->avgPlayDurationUs = 0;
+    context->queueOverloadSinceUs = 0;
     if (context->mediaInfo.audio.type == NDL_AUDIO_TYPE_PCM) {
         unsigned short empty_buf[8] = {0};
         int numChannels = 2;
