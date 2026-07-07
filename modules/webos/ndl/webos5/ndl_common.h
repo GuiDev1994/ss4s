@@ -38,6 +38,8 @@ struct SS4S_PlayerContext {
     uint64_t lastSaturationLogUs;
     /* Time when the render queue first exceeded maxQueueFrames, 0 when below threshold */
     uint64_t queueOverloadSinceUs;
+    /* Time when the decoder feed call started exceeding the frame interval, 0 when keeping up */
+    uint64_t saturatedSinceUs;
 };
 
 extern const SS4S_PlayerDriver SS4S_NDL_webOS5_PlayerDriver;

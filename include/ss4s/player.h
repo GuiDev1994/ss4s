@@ -57,6 +57,15 @@ bool SS4S_PlayerGetVideoLatency(SS4S_Player *player, int avgIntervalUs, int *lat
  */
 bool SS4S_PlayerGetVideoQueueDepth(SS4S_Player *player, int *queueDepth);
 
+/**
+ * Get the average time the platform decoder takes to accept one video frame, as last reported by the
+ * video module. Values above the frame interval indicate the decoder is applying backpressure.
+ * @param player Player instance
+ * @param feedTimeUs Feed time field to assign, in microseconds
+ * @return true if the module has reported a feed time, false otherwise
+ */
+bool SS4S_PlayerGetVideoFeedTime(SS4S_Player *player, int *feedTimeUs);
+
 #ifdef __cplusplus
 }
 #endif

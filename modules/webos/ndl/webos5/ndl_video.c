@@ -95,6 +95,8 @@ static SS4S_VideoOpenResult OpenVideo(const SS4S_VideoInfo *info, const SS4S_Vid
 #define SATURATION_LOG_INTERVAL_US 5000000
 /* How long the render queue must stay above the threshold before the watchdog flushes, in microseconds */
 #define QUEUE_OVERLOAD_GRACE_US 500000
+/* How long the decoder must keep blocking the feed call before the watchdog flushes, in microseconds */
+#define SATURATION_GRACE_US 2000000
 
 static SS4S_VideoFeedResult FeedVideo(SS4S_VideoInstance *instance, const unsigned char *data, size_t size,
                                       SS4S_VideoFeedFlags flags) {
@@ -150,24 +152,48 @@ static SS4S_VideoFeedResult FeedVideo(SS4S_VideoInstance *instance, const unsign
     if (renderBufferLength >= 0 && SS4S_NDL_webOS5_Lib->VideoStats.ReportQueueDepth != NULL) {
         SS4S_NDL_webOS5_Lib->VideoStats.ReportQueueDepth(context->player, renderBufferLength);
     }
+    if (SS4S_NDL_webOS5_Lib->VideoStats.ReportFeedTime != NULL) {
+        SS4S_NDL_webOS5_Lib->VideoStats.ReportFeedTime(context->player, (uint32_t) context->avgPlayDurationUs);
+    }
     context->lastFrameTime = now;
-    /* Low latency watchdog: when the render queue stays above the configured depth for longer than
-     * the grace period, flush the queued frames and ask the host for an IDR frame. */
-    if (SS4S_NDL_webOS5_Config.lowLatency && renderBufferLength >= 0) {
-        if (renderBufferLength > SS4S_NDL_webOS5_Config.maxQueueFrames) {
-            if (context->queueOverloadSinceUs == 0) {
-                context->queueOverloadSinceUs = now;
-            } else if (now - context->queueOverloadSinceUs > QUEUE_OVERLOAD_GRACE_US) {
+    if (SS4S_NDL_webOS5_Config.lowLatency) {
+        /* Watchdog trigger 1: the render queue stays above the configured depth for longer than
+         * the grace period. Flush the queued frames and ask the host for an IDR frame. */
+        if (renderBufferLength >= 0) {
+            if (renderBufferLength > SS4S_NDL_webOS5_Config.maxQueueFrames) {
+                if (context->queueOverloadSinceUs == 0) {
+                    context->queueOverloadSinceUs = now;
+                } else if (now - context->queueOverloadSinceUs > QUEUE_OVERLOAD_GRACE_US) {
+                    context->queueOverloadSinceUs = 0;
+                    int flushRc = FlushRenderBuffer();
+                    SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL",
+                                        "Render queue stuck at %d frames (limit %d), flushed (rc=%d) and "
+                                        "requesting keyframe", renderBufferLength,
+                                        SS4S_NDL_webOS5_Config.maxQueueFrames, flushRc);
+                    return SS4S_VIDEO_FEED_REQUEST_KEYFRAME;
+                }
+            } else {
                 context->queueOverloadSinceUs = 0;
+            }
+        }
+        /* Watchdog trigger 2: the decoder keeps blocking the feed call longer than the frame interval
+         * (backpressure), meaning it can't decode the stream in real time and delay is accumulating in
+         * buffers that renderBufferLength doesn't report. */
+        if (context->avgFrameIntervalUs > 0 && context->avgPlayDurationUs > context->avgFrameIntervalUs) {
+            if (context->saturatedSinceUs == 0) {
+                context->saturatedSinceUs = now;
+            } else if (now - context->saturatedSinceUs > SATURATION_GRACE_US) {
+                context->saturatedSinceUs = 0;
                 int flushRc = FlushRenderBuffer();
                 SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL",
-                                    "Render queue stuck at %d frames (limit %d), flushed (rc=%d) and "
-                                    "requesting keyframe", renderBufferLength,
-                                    SS4S_NDL_webOS5_Config.maxQueueFrames, flushRc);
+                                    "Decoder backpressure for >%d ms (feed call avg %.0f us, frame interval "
+                                    "%.0f us), flushed (rc=%d) and requesting keyframe",
+                                    SATURATION_GRACE_US / 1000, context->avgPlayDurationUs,
+                                    context->avgFrameIntervalUs, flushRc);
                 return SS4S_VIDEO_FEED_REQUEST_KEYFRAME;
             }
         } else {
-            context->queueOverloadSinceUs = 0;
+            context->saturatedSinceUs = 0;
         }
     }
     return SS4S_VIDEO_FEED_OK;

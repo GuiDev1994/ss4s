@@ -159,6 +159,7 @@ static int LoadMedia(SS4S_PlayerContext *context) {
     context->avgFrameIntervalUs = 0;
     context->avgPlayDurationUs = 0;
     context->queueOverloadSinceUs = 0;
+    context->saturatedSinceUs = 0;
     if (context->mediaInfo.audio.type == NDL_AUDIO_TYPE_PCM) {
         unsigned short empty_buf[8] = {0};
         int numChannels = 2;

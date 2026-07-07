@@ -19,6 +19,8 @@ struct SS4S_Player {
         SS4S_StatsCounter video;
         int videoQueueDepth;
         bool videoQueueDepthValid;
+        uint32_t videoFeedTimeUs;
+        bool videoFeedTimeValid;
     } stats;
 };
 
@@ -38,3 +40,5 @@ void SS4S_VideoStatsEndFrame(SS4S_Player *player, uint32_t beginFrameResult);
 void SS4S_VideoStatsReportFrame(SS4S_Player *player, uint32_t latencyUs);
 
 void SS4S_VideoStatsReportQueueDepth(SS4S_Player *player, int queueDepth);
+
+void SS4S_VideoStatsReportFeedTime(SS4S_Player *player, uint32_t feedTimeUs);

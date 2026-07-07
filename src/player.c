@@ -134,3 +134,14 @@ bool SS4S_PlayerGetVideoQueueDepth(SS4S_Player *player, int *queueDepth) {
     SS4S_MutexUnlock(player->mutex);
     return valid;
 }
+
+bool SS4S_PlayerGetVideoFeedTime(SS4S_Player *player, int *feedTimeUs) {
+    assert(player != NULL);
+    SS4S_MutexLock(player->mutex);
+    bool valid = player->stats.videoFeedTimeValid;
+    if (valid) {
+        *feedTimeUs = (int) player->stats.videoFeedTimeUs;
+    }
+    SS4S_MutexUnlock(player->mutex);
+    return valid;
+}
