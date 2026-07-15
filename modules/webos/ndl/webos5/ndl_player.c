@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <string.h>
+#include <stdio.h>
 
 #include "opus_empty.h"
 
@@ -46,6 +47,103 @@ uint64_t SS4S_NDL_webOS5_GetPts(const SS4S_PlayerContext *context) {
     uint64_t pts = (now.tv_sec * 1000) + (now.tv_nsec / 1000000) - context->mediaLoadedTime.tv_sec * 1000 -
                    context->mediaLoadedTime.tv_nsec / 1000000;
     return pts;
+}
+
+void SS4S_NDL_webOS5_ConfigureSmoothPacing(SS4S_PlayerContext *context, int fpsNum, int fpsDen) {
+    if (!context) {
+        return;
+    }
+    const char *env = getenv("SS4S_SMOOTH_PACING");
+    if (env == NULL || env[0] == '\0') {
+        env = getenv("SS4S_NDL_SMOOTH_PACING");
+    }
+    /* Default ON unless explicitly disabled with "0"/"false"/"off". */
+    bool enabled = true;
+    if (env != NULL && env[0] != '\0') {
+        if (env[0] == '0' || strcmp(env, "false") == 0 || strcmp(env, "off") == 0 ||
+            strcmp(env, "FALSE") == 0 || strcmp(env, "OFF") == 0) {
+            enabled = false;
+        }
+    }
+    context->smoothPacing = enabled;
+    context->smoothPtsInitialized = false;
+    context->smoothLastPts = 0;
+    context->hostPtsAnchored = false;
+    context->hostPtsAnchorUs = 0;
+    context->hostPtsPlayerAnchorMs = 0;
+
+    double intervalMs = 1000.0 / 60.0;
+    const char *intervalEnv = getenv("SS4S_SMOOTH_PACING_INTERVAL_US");
+    if (intervalEnv == NULL || intervalEnv[0] == '\0') {
+        intervalEnv = getenv("SS4S_NDL_PACING_INTERVAL_US");
+    }
+    if (intervalEnv != NULL && intervalEnv[0] != '\0') {
+        long us = strtol(intervalEnv, NULL, 10);
+        if (us > 1000 && us < 100000) {
+            intervalMs = (double) us / 1000.0;
+        }
+    } else if (fpsNum > 0 && fpsDen > 0) {
+        intervalMs = 1000.0 * (double) fpsDen / (double) fpsNum;
+    }
+    if (intervalMs < 1.0) {
+        intervalMs = 1.0;
+    }
+    context->smoothIntervalMs = intervalMs;
+    context->smoothMaxDriftMs = intervalMs * 2.0;
+
+    if (enabled) {
+        SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
+                            "Smooth pacing enabled interval=%.2fms maxDrift=%.2fms",
+                            context->smoothIntervalMs, context->smoothMaxDriftMs);
+    } else {
+        SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "Smooth pacing disabled (wall-clock PTS)");
+    }
+}
+
+uint64_t SS4S_NDL_webOS5_NextVideoPts(SS4S_PlayerContext *context, int64_t hostPtsUs) {
+    uint64_t wall = SS4S_NDL_webOS5_GetPts(context);
+    uint64_t base = wall;
+    if (context->smoothPacing && hostPtsUs >= 0) {
+        if (!context->hostPtsAnchored) {
+            context->hostPtsAnchorUs = hostPtsUs;
+            context->hostPtsPlayerAnchorMs = (double) wall;
+            context->hostPtsAnchored = true;
+            SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
+                                "Host PTS anchored hostUs=%lld playerMs=%llu",
+                                (long long) hostPtsUs, (unsigned long long) wall);
+            base = wall;
+        } else {
+            double mapped = context->hostPtsPlayerAnchorMs +
+                            (double) (hostPtsUs - context->hostPtsAnchorUs) / 1000.0;
+            if (mapped < 0) {
+                mapped = 0;
+            }
+            base = (uint64_t) (mapped + 0.5);
+        }
+    }
+    if (!context->smoothPacing || context->smoothIntervalMs <= 0) {
+        return base;
+    }
+    if (!context->smoothPtsInitialized) {
+        context->smoothLastPts = (double) base;
+        context->smoothPtsInitialized = true;
+        return base;
+    }
+    double ideal = context->smoothLastPts + context->smoothIntervalMs;
+    double minPts = (double) base - context->smoothMaxDriftMs;
+    double maxPts = (double) base + context->smoothMaxDriftMs;
+    double pts = ideal;
+    if (pts < minPts) {
+        pts = minPts;
+    } else if (pts > maxPts) {
+        pts = maxPts;
+    }
+    /* Monotonic: at least +1 ms from last video PTS. */
+    if (pts < context->smoothLastPts + 1.0) {
+        pts = context->smoothLastPts + 1.0;
+    }
+    context->smoothLastPts = pts;
+    return (uint64_t) (pts + 0.5);
 }
 
 static SS4S_PlayerContext *CreatePlayerContext(SS4S_Player *player) {
@@ -122,6 +220,12 @@ static int LoadMedia(SS4S_PlayerContext *context) {
 
     context->mediaLoaded = true;
     clock_gettime(CLOCK_MONOTONIC, &context->mediaLoadedTime);
+    context->smoothPtsInitialized = false;
+    context->smoothLastPts = 0;
+    context->hostPtsAnchored = false;
+    context->hostPtsAnchorUs = 0;
+    context->hostPtsPlayerAnchorMs = 0;
+    context->lastFrameTime = 0;
     return ret;
 }
 

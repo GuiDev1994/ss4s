@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <stdint.h>
 #include "ss4s.h"
 #include "library.h"
 
@@ -54,6 +55,11 @@ SS4S_VideoOpenResult SS4S_PlayerVideoOpen(SS4S_Player *player, const SS4S_VideoI
 
 SS4S_VideoFeedResult SS4S_PlayerVideoFeed(SS4S_Player *player, const unsigned char *data, size_t size,
                                           SS4S_VideoFeedFlags flags) {
+    return SS4S_PlayerVideoFeedWithPTS(player, data, size, flags, -1);
+}
+
+SS4S_VideoFeedResult SS4S_PlayerVideoFeedWithPTS(SS4S_Player *player, const unsigned char *data, size_t size,
+                                                 SS4S_VideoFeedFlags flags, int64_t ptsUs) {
     SS4S_VideoInstance *video = SS4S_FeedGuardAcquire(&player->video_guard);
     if (video == NULL) {
         return SS4S_VIDEO_FEED_NOT_READY;
@@ -61,7 +67,12 @@ SS4S_VideoFeedResult SS4S_PlayerVideoFeed(SS4S_Player *player, const unsigned ch
     const SS4S_VideoDriver *driver = SS4S_GetVideoDriver();
     assert(driver != NULL);
     assert(driver->Feed != NULL);
-    SS4S_VideoFeedResult result = driver->Feed(video, data, size, flags);
+    SS4S_VideoFeedResult result;
+    if (driver->FeedWithPTS != NULL) {
+        result = driver->FeedWithPTS(video, data, size, flags, ptsUs);
+    } else {
+        result = driver->Feed(video, data, size, flags);
+    }
     SS4S_FeedGuardRelease(&player->video_guard);
     return result;
 }

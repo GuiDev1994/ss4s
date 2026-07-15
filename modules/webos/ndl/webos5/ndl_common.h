@@ -1,6 +1,7 @@
 #pragma once
 
 #include <pthread.h>
+#include <stdint.h>
 #include <NDL_directmedia_v2.h>
 
 #include "ss4s/modapi.h"
@@ -21,6 +22,16 @@ struct SS4S_PlayerContext {
     bool waitAudioVideoReady;
     int aspectRatio;
     bool hasHdrInfo;
+    /* Smooth presentation pacing (virtual PTS grid). */
+    bool smoothPacing;
+    bool smoothPtsInitialized;
+    double smoothIntervalMs;
+    double smoothMaxDriftMs;
+    double smoothLastPts;
+    /* Host presentationTimeUs → player PTS mapping (ms). */
+    bool hostPtsAnchored;
+    int64_t hostPtsAnchorUs;
+    double hostPtsPlayerAnchorMs;
 };
 
 extern const SS4S_PlayerDriver SS4S_NDL_webOS5_PlayerDriver;
@@ -32,6 +43,11 @@ int SS4S_NDL_webOS5_ReloadMedia(SS4S_PlayerContext *context);
 int SS4S_NDL_webOS5_UnloadMedia(SS4S_PlayerContext *context);
 
 uint64_t SS4S_NDL_webOS5_GetPts(const SS4S_PlayerContext *context);
+
+/** Wall-clock / host-mapped PTS, optionally smoothed on a virtual grid. */
+uint64_t SS4S_NDL_webOS5_NextVideoPts(SS4S_PlayerContext *context, int64_t hostPtsUs);
+
+void SS4S_NDL_webOS5_ConfigureSmoothPacing(SS4S_PlayerContext *context, int fpsNum, int fpsDen);
 
 int SS4S_NDL_webOS5_Driver_PostInit(int argc, char *argv[]);
 

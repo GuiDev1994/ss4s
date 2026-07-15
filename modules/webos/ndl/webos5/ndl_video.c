@@ -57,6 +57,7 @@ static SS4S_VideoOpenResult OpenVideo(const SS4S_VideoInfo *info, const SS4S_Vid
             goto finish;
     }
     context->mediaInfo.video.unknown1 = 0;
+    SS4S_NDL_webOS5_ConfigureSmoothPacing(context, info->frameRateNumerator, info->frameRateDenominator);
     result = ReloadWithSize(context, info->width, info->height);
     if (result != SS4S_VIDEO_OPEN_OK) {
         goto finish;
@@ -70,14 +71,14 @@ static SS4S_VideoOpenResult OpenVideo(const SS4S_VideoInfo *info, const SS4S_Vid
     return result;
 }
 
-static SS4S_VideoFeedResult FeedVideo(SS4S_VideoInstance *instance, const unsigned char *data, size_t size,
-                                      SS4S_VideoFeedFlags flags) {
+static SS4S_VideoFeedResult FeedVideoWithPTS(SS4S_VideoInstance *instance, const unsigned char *data, size_t size,
+                                             SS4S_VideoFeedFlags flags, int64_t ptsUs) {
     (void) flags;
     SS4S_PlayerContext *context = (void *) instance;
     if (!context->mediaLoaded) {
         return SS4S_VIDEO_FEED_NOT_READY;
     }
-    uint64_t pts = SS4S_NDL_webOS5_GetPts(context);
+    uint64_t pts = SS4S_NDL_webOS5_NextVideoPts(context, ptsUs);
     int rc = NDL_DirectVideoPlay((void *) data, size, (long long) pts);
     if (rc != 0) {
         SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL", "NDL_DirectVideoPlay returned %d: %s", rc,
@@ -93,6 +94,11 @@ static SS4S_VideoFeedResult FeedVideo(SS4S_VideoInstance *instance, const unsign
     }
     context->lastFrameTime = now;
     return SS4S_VIDEO_FEED_OK;
+}
+
+static SS4S_VideoFeedResult FeedVideo(SS4S_VideoInstance *instance, const unsigned char *data, size_t size,
+                                      SS4S_VideoFeedFlags flags) {
+    return FeedVideoWithPTS(instance, data, size, flags, -1);
 }
 
 static bool SizeChanged(SS4S_VideoInstance *instance, int width, int height) {
@@ -191,6 +197,7 @@ const SS4S_VideoDriver SS4S_NDL_webOS5_VideoDriver = {
     .GetCapabilities = GetCapabilities,
     .Open = OpenVideo,
     .Feed = FeedVideo,
+    .FeedWithPTS = FeedVideoWithPTS,
     .SizeChanged = SizeChanged,
     .SetHDRInfo = SetHDRInfo,
     .Close = CloseVideo,

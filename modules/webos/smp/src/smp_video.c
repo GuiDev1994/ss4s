@@ -41,6 +41,7 @@ static SS4S_VideoOpenResult VideoOpen(const SS4S_VideoInfo *info, const SS4S_Vid
     StarfishPlayerLock(context);
     context->videoInfo = *info;
     context->hasVideo = true;
+    StarfishPlayerConfigureSmoothPacing(context, info->frameRateNumerator, info->frameRateDenominator);
     *instance = (void *) context;
     if (!context->hasAudio && context->waitAudioVideoReady) {
         StarfishLibContext->Log(SS4S_LogLevelInfo, "SMP", "VideoOpen: defer loading until audio is ready");
@@ -68,10 +69,10 @@ static void VideoClose(SS4S_VideoInstance *instance) {
 }
 
 
-static SS4S_VideoFeedResult VideoFeed(SS4S_VideoInstance *instance, const unsigned char *data, size_t size,
-                                      SS4S_VideoFeedFlags flags) {
+static SS4S_VideoFeedResult VideoFeedWithPTS(SS4S_VideoInstance *instance, const unsigned char *data, size_t size,
+                                             SS4S_VideoFeedFlags flags, int64_t ptsUs) {
     (void) flags;
-    switch (StarfishPlayerFeed((SS4S_PlayerContext *) instance, data, size, 1)) {
+    switch (StarfishPlayerFeedVideo((SS4S_PlayerContext *) instance, data, size, ptsUs)) {
         case SMP_FEED_OK:
             return SS4S_VIDEO_FEED_OK;
         case SMP_FEED_NOT_READY:
@@ -81,6 +82,11 @@ static SS4S_VideoFeedResult VideoFeed(SS4S_VideoInstance *instance, const unsign
         default:
             return SS4S_VIDEO_FEED_ERROR;
     }
+}
+
+static SS4S_VideoFeedResult VideoFeed(SS4S_VideoInstance *instance, const unsigned char *data, size_t size,
+                                      SS4S_VideoFeedFlags flags) {
+    return VideoFeedWithPTS(instance, data, size, flags, -1);
 }
 
 static bool SizeChanged(SS4S_VideoInstance *instance, int width, int height) {
@@ -162,6 +168,7 @@ const SS4S_VideoDriver StarfishVideoDriver = {
         .GetCapabilities = GetVideoCapabilities,
         .Open = VideoOpen,
         .Feed = VideoFeed,
+        .FeedWithPTS = VideoFeedWithPTS,
         .SizeChanged = SizeChanged,
         .SetHDRInfo = SetHDRInfo,
         .SetDisplayArea = SetDisplayArea,
