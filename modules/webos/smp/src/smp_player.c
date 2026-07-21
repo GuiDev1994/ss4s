@@ -258,12 +258,21 @@ void StarfishPlayerConfigureSmoothPacing(SS4S_PlayerContext *ctx, int fpsNum, in
         intervalNs = 1000000.0;
     }
     ctx->smoothIntervalNs = intervalNs;
-    ctx->smoothMaxDriftNs = intervalNs * 2.0;
+    double driftFrames = 0.5;
+    const char *driftEnv = getenv("SS4S_SMOOTH_PACING_MAX_DRIFT_FRAMES");
+    if (driftEnv != NULL && driftEnv[0] != '\0') {
+        double d = strtod(driftEnv, NULL);
+        if (d >= 0.15 && d <= 4.0) {
+            driftFrames = d;
+        }
+    }
+    ctx->smoothMaxDriftNs = intervalNs * driftFrames;
 
     if (enabled) {
         StarfishLibContext->Log(SS4S_LogLevelInfo, "SMP",
-                                "Smooth pacing enabled interval=%.2fms maxDrift=%.2fms",
-                                ctx->smoothIntervalNs / 1000000.0, ctx->smoothMaxDriftNs / 1000000.0);
+                                "Smooth pacing enabled interval=%.2fms maxDrift=%.2fms (%.2f frames)",
+                                ctx->smoothIntervalNs / 1000000.0, ctx->smoothMaxDriftNs / 1000000.0,
+                                driftFrames);
     } else {
         StarfishLibContext->Log(SS4S_LogLevelInfo, "SMP", "Smooth pacing disabled (wall-clock PTS)");
     }

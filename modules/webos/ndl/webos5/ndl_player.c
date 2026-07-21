@@ -89,12 +89,20 @@ void SS4S_NDL_webOS5_ConfigureSmoothPacing(SS4S_PlayerContext *context, int fpsN
         intervalMs = 1.0;
     }
     context->smoothIntervalMs = intervalMs;
-    context->smoothMaxDriftMs = intervalMs * 2.0;
+    double driftFrames = 0.5;
+    const char *driftEnv = getenv("SS4S_SMOOTH_PACING_MAX_DRIFT_FRAMES");
+    if (driftEnv != NULL && driftEnv[0] != '\0') {
+        double d = strtod(driftEnv, NULL);
+        if (d >= 0.15 && d <= 4.0) {
+            driftFrames = d;
+        }
+    }
+    context->smoothMaxDriftMs = intervalMs * driftFrames;
 
     if (enabled) {
         SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
-                            "Smooth pacing enabled interval=%.2fms maxDrift=%.2fms",
-                            context->smoothIntervalMs, context->smoothMaxDriftMs);
+                            "Smooth pacing enabled interval=%.2fms maxDrift=%.2fms (%.2f frames)",
+                            context->smoothIntervalMs, context->smoothMaxDriftMs, driftFrames);
     } else {
         SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "Smooth pacing disabled (wall-clock PTS)");
     }
