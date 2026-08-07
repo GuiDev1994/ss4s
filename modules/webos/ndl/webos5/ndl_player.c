@@ -73,12 +73,20 @@ void SS4S_NDL_webOS5_ConfigureSmoothPacing(SS4S_PlayerContext *context, int fpsN
     context->hostPtsPlayerAnchorMs = 0;
 
     context->smoothHostOnly = false;
+    context->presentationOffsetMs = 0;
     {
         const char *hostOnly = getenv("SS4S_SMOOTH_PACING_HOST_ONLY");
         if (hostOnly != NULL && hostOnly[0] != '\0' && hostOnly[0] != '0' &&
             strcmp(hostOnly, "false") != 0 && strcmp(hostOnly, "off") != 0 &&
             strcmp(hostOnly, "FALSE") != 0 && strcmp(hostOnly, "OFF") != 0) {
             context->smoothHostOnly = true;
+        }
+        const char *offEnv = getenv("SS4S_PRESENTATION_OFFSET_US");
+        if (offEnv != NULL && offEnv[0] != '\0') {
+            long us = strtol(offEnv, NULL, 10);
+            if (us > 0 && us < 100000) {
+                context->presentationOffsetMs = (double) us / 1000.0;
+            }
         }
     }
 
@@ -111,7 +119,8 @@ void SS4S_NDL_webOS5_ConfigureSmoothPacing(SS4S_PlayerContext *context, int fpsN
 
     if (enabled && context->smoothHostOnly) {
         SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
-                            "Smooth pacing host-PTS-only (no interval grid; HDR/Main10 path)");
+                            "Smooth pacing host-PTS-only offset=%.2fms (no interval grid)",
+                            context->presentationOffsetMs);
     } else if (enabled) {
         SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
                             "Smooth pacing enabled interval=%.2fms maxDrift=%.2fms (%.2f frames)",
@@ -145,9 +154,9 @@ uint64_t SS4S_NDL_webOS5_NextVideoPts(SS4S_PlayerContext *context, int64_t hostP
     if (!context->smoothPacing || context->smoothIntervalMs <= 0) {
         return base;
     }
-    /* HDR/Main10: follow host timestamps only; skip synthetic grid clamp. */
+    /* Host PTS only: skip synthetic grid; optional presentation slack. */
     if (context->smoothHostOnly) {
-        double pts = (double) base;
+        double pts = (double) base + context->presentationOffsetMs;
         if (context->smoothPtsInitialized && pts < context->smoothLastPts + 1.0) {
             pts = context->smoothLastPts + 1.0;
         }

@@ -38,6 +38,8 @@ struct SS4S_PlayerContext {
     bool smoothPacing;
     /* When true: map host PTS only (no interval grid / drift clamp). */
     bool smoothHostOnly;
+    /* Extra delay added to host-mapped PTS (ns), from SS4S_PRESENTATION_OFFSET_US. */
+    double presentationOffsetNs;
     bool smoothPtsInitialized;
     double smoothIntervalNs;
     double smoothMaxDriftNs;
