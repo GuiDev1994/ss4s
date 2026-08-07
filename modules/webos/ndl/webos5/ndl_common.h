@@ -24,6 +24,8 @@ struct SS4S_PlayerContext {
     bool hasHdrInfo;
     /* Smooth presentation pacing (virtual PTS grid). */
     bool smoothPacing;
+    /* When true: map host PTS only (no interval grid / drift clamp). */
+    bool smoothHostOnly;
     bool smoothPtsInitialized;
     double smoothIntervalMs;
     double smoothMaxDriftMs;

@@ -39,6 +39,14 @@ static bool GetCapabilities(SS4S_AudioCapabilities *capabilities, SS4S_AudioCode
 }
 
 static SS4S_AudioCodec GetPreferredCodecs(const SS4S_AudioInfo *info) {
+    /*
+     * Prefer PCM for 5.1 when the platform supports it (webOS 7+). Opus 5.1 often
+     * forces opus_fix re-encode or passthrough quirks that drop frames silently;
+     * stereo still prefers PCM client-decode as before.
+     */
+    if (info->numOfChannels == 6 && SupportsPCM6Channel) {
+        return SS4S_AUDIO_PCM_S16LE;
+    }
     if (info->numOfChannels == 6) {
         return SS4S_AUDIO_OPUS;
     }

@@ -72,6 +72,16 @@ void SS4S_NDL_webOS5_ConfigureSmoothPacing(SS4S_PlayerContext *context, int fpsN
     context->hostPtsAnchorUs = 0;
     context->hostPtsPlayerAnchorMs = 0;
 
+    context->smoothHostOnly = false;
+    {
+        const char *hostOnly = getenv("SS4S_SMOOTH_PACING_HOST_ONLY");
+        if (hostOnly != NULL && hostOnly[0] != '\0' && hostOnly[0] != '0' &&
+            strcmp(hostOnly, "false") != 0 && strcmp(hostOnly, "off") != 0 &&
+            strcmp(hostOnly, "FALSE") != 0 && strcmp(hostOnly, "OFF") != 0) {
+            context->smoothHostOnly = true;
+        }
+    }
+
     double intervalMs = 1000.0 / 60.0;
     const char *intervalEnv = getenv("SS4S_SMOOTH_PACING_INTERVAL_US");
     if (intervalEnv == NULL || intervalEnv[0] == '\0') {
@@ -99,7 +109,10 @@ void SS4S_NDL_webOS5_ConfigureSmoothPacing(SS4S_PlayerContext *context, int fpsN
     }
     context->smoothMaxDriftMs = intervalMs * driftFrames;
 
-    if (enabled) {
+    if (enabled && context->smoothHostOnly) {
+        SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
+                            "Smooth pacing host-PTS-only (no interval grid; HDR/Main10 path)");
+    } else if (enabled) {
         SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
                             "Smooth pacing enabled interval=%.2fms maxDrift=%.2fms (%.2f frames)",
                             context->smoothIntervalMs, context->smoothMaxDriftMs, driftFrames);
@@ -131,6 +144,16 @@ uint64_t SS4S_NDL_webOS5_NextVideoPts(SS4S_PlayerContext *context, int64_t hostP
     }
     if (!context->smoothPacing || context->smoothIntervalMs <= 0) {
         return base;
+    }
+    /* HDR/Main10: follow host timestamps only; skip synthetic grid clamp. */
+    if (context->smoothHostOnly) {
+        double pts = (double) base;
+        if (context->smoothPtsInitialized && pts < context->smoothLastPts + 1.0) {
+            pts = context->smoothLastPts + 1.0;
+        }
+        context->smoothLastPts = pts;
+        context->smoothPtsInitialized = true;
+        return (uint64_t) (pts + 0.5);
     }
     if (!context->smoothPtsInitialized) {
         context->smoothLastPts = (double) base;

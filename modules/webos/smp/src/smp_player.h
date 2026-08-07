@@ -36,6 +36,8 @@ struct SS4S_PlayerContext {
 
     /* Smooth presentation pacing (virtual PTS grid, nanoseconds). */
     bool smoothPacing;
+    /* When true: map host PTS only (no interval grid / drift clamp). */
+    bool smoothHostOnly;
     bool smoothPtsInitialized;
     double smoothIntervalNs;
     double smoothMaxDriftNs;

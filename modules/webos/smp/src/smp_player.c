@@ -244,6 +244,16 @@ void StarfishPlayerConfigureSmoothPacing(SS4S_PlayerContext *ctx, int fpsNum, in
     ctx->hostPtsAnchorUs = 0;
     ctx->hostPtsPlayerAnchorNs = 0;
 
+    ctx->smoothHostOnly = false;
+    {
+        const char *hostOnly = getenv("SS4S_SMOOTH_PACING_HOST_ONLY");
+        if (hostOnly != NULL && hostOnly[0] != '\0' && hostOnly[0] != '0' &&
+            strcmp(hostOnly, "false") != 0 && strcmp(hostOnly, "off") != 0 &&
+            strcmp(hostOnly, "FALSE") != 0 && strcmp(hostOnly, "OFF") != 0) {
+            ctx->smoothHostOnly = true;
+        }
+    }
+
     double intervalNs = 1000000000.0 / 60.0;
     const char *intervalEnv = SmoothPacingIntervalEnv();
     if (intervalEnv != NULL && intervalEnv[0] != '\0') {
@@ -268,7 +278,10 @@ void StarfishPlayerConfigureSmoothPacing(SS4S_PlayerContext *ctx, int fpsNum, in
     }
     ctx->smoothMaxDriftNs = intervalNs * driftFrames;
 
-    if (enabled) {
+    if (enabled && ctx->smoothHostOnly) {
+        StarfishLibContext->Log(SS4S_LogLevelInfo, "SMP",
+                                "Smooth pacing host-PTS-only (no interval grid; HDR/Main10 path)");
+    } else if (enabled) {
         StarfishLibContext->Log(SS4S_LogLevelInfo, "SMP",
                                 "Smooth pacing enabled interval=%.2fms maxDrift=%.2fms (%.2f frames)",
                                 ctx->smoothIntervalNs / 1000000.0, ctx->smoothMaxDriftNs / 1000000.0,
@@ -303,6 +316,16 @@ uint64_t StarfishPlayerNextVideoPts(SS4S_PlayerContext *ctx, int64_t hostPtsUs) 
     uint64_t base = StarfishPlayerMapBasePts(ctx, hostPtsUs);
     if (!ctx->smoothPacing || ctx->smoothIntervalNs <= 0) {
         return base;
+    }
+    /* HDR/Main10: follow host timestamps only; skip synthetic grid clamp. */
+    if (ctx->smoothHostOnly) {
+        double pts = (double) base;
+        if (ctx->smoothPtsInitialized && pts < ctx->smoothLastPts + 1000000.0) {
+            pts = ctx->smoothLastPts + 1000000.0;
+        }
+        ctx->smoothLastPts = pts;
+        ctx->smoothPtsInitialized = true;
+        return (uint64_t) (pts + 0.5);
     }
     if (!ctx->smoothPtsInitialized) {
         ctx->smoothLastPts = (double) base;
