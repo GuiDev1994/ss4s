@@ -13,12 +13,15 @@ static void DestroyPlayerContext(SS4S_PlayerContext *context);
 
 static void PlayerSetWaitAudioVideoReady(SS4S_PlayerContext *context, bool option);
 
+static void PlayerSetPanelPhaseLoosen(SS4S_PlayerContext *context, bool loosen);
+
 static int OpusFeedEmpty(void *arg, const unsigned char *data, size_t size);
 
 const SS4S_PlayerDriver SS4S_NDL_webOS5_PlayerDriver = {
     .Create = CreatePlayerContext,
     .Destroy = DestroyPlayerContext,
     .SetWaitAudioVideoReady = PlayerSetWaitAudioVideoReady,
+    .SetPanelPhaseLoosen = PlayerSetPanelPhaseLoosen,
 };
 
 static int UnloadMedia(SS4S_PlayerContext *context);
@@ -165,7 +168,7 @@ void SS4S_NDL_webOS5_ConfigureSmoothPacing(SS4S_PlayerContext *context, int fpsN
 uint64_t SS4S_NDL_webOS5_NextVideoPts(SS4S_PlayerContext *context, int64_t hostPtsUs) {
     uint64_t wall = SS4S_NDL_webOS5_GetPts(context);
     if (context->panelPhasePacing) {
-        bool loosen = SS4S_PlayerGetPanelPhaseLoosen(context->player);
+        bool loosen = atomic_load(&context->panelPhaseLoosen);
         if (!loosen) {
             if (!context->panelPhaseAnchored) {
                 context->panelPhaseAnchorMs = wall;
@@ -238,6 +241,7 @@ static SS4S_PlayerContext *CreatePlayerContext(SS4S_Player *player) {
     assert(ActivatePlayerContext == NULL);
     SS4S_PlayerContext *created = calloc(1, sizeof(SS4S_PlayerContext));
     created->player = player;
+    atomic_init(&created->panelPhaseLoosen, false);
     ActivatePlayerContext = created;
     return created;
 }
@@ -251,6 +255,10 @@ static void DestroyPlayerContext(SS4S_PlayerContext *context) {
 
 static void PlayerSetWaitAudioVideoReady(SS4S_PlayerContext *context, bool option) {
     context->waitAudioVideoReady = option;
+}
+
+static void PlayerSetPanelPhaseLoosen(SS4S_PlayerContext *context, bool loosen) {
+    atomic_store(&context->panelPhaseLoosen, loosen);
 }
 
 static int UnloadMedia(SS4S_PlayerContext *context) {

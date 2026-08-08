@@ -3,6 +3,7 @@
 #include "ss4s/modapi.h"
 #include <pthread.h>
 #include <stdint.h>
+#include <stdatomic.h>
 
 typedef enum PlayerState {
     SMP_STATE_UNLOADED,
@@ -33,6 +34,7 @@ struct SS4S_PlayerContext {
     bool hdr, shouldStop;
 
     bool waitAudioVideoReady;
+    _Atomic bool panelPhaseLoosen;
 
     /* Smooth presentation pacing (virtual PTS grid, nanoseconds). */
     bool smoothPacing;

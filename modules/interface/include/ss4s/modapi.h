@@ -36,6 +36,11 @@ typedef struct SS4S_PlayerDriver {
     void (*Destroy)(SS4S_PlayerContext *context);
 
     void (*SetWaitAudioVideoReady)(SS4S_PlayerContext *context, bool option);
+
+    /**
+     * Optional. Update the panel-phase pacing mode for the video player.
+     */
+    void (*SetPanelPhaseLoosen)(SS4S_PlayerContext *context, bool loosen);
 } SS4S_PlayerDriver;
 
 typedef struct SS4S_AudioInstance SS4S_AudioInstance;

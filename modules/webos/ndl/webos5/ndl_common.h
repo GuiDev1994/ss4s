@@ -2,6 +2,7 @@
 
 #include <pthread.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <NDL_directmedia_v2.h>
 
 #include "ss4s/player.h"
@@ -22,6 +23,7 @@ struct SS4S_PlayerContext {
     bool mediaLoaded;
     struct timespec mediaLoadedTime;
     bool waitAudioVideoReady;
+    _Atomic bool panelPhaseLoosen;
     int aspectRatio;
     bool hasHdrInfo;
     /* Smooth presentation pacing (virtual PTS grid). */

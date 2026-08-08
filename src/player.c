@@ -128,6 +128,14 @@ bool SS4S_PlayerGetVideoLatency(SS4S_Player *player, int avgIntervalUs, int *lat
 void SS4S_PlayerSetPanelPhaseLoosen(SS4S_Player *player, bool loosen) {
     assert(player != NULL);
     atomic_store(&player->panelPhaseLoosen, loosen);
+    SS4S_MutexLock(player->mutex);
+    if (player->context.video != NULL) {
+        const SS4S_PlayerDriver *videoPlayerDriver = SS4S_GetVideoPlayerDriver();
+        if (videoPlayerDriver->SetPanelPhaseLoosen != NULL) {
+            videoPlayerDriver->SetPanelPhaseLoosen(player->context.video, loosen);
+        }
+    }
+    SS4S_MutexUnlock(player->mutex);
 }
 
 bool SS4S_PlayerGetPanelPhaseLoosen(const SS4S_Player *player) {

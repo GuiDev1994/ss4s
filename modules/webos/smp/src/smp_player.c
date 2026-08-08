@@ -31,6 +31,7 @@ static SS4S_PlayerContext *CreatePlayer(SS4S_Player *player) {
     context->appId = strdup(appId);
     pthread_mutex_init(&context->lock, NULL);
     context->player = player;
+    atomic_init(&context->panelPhaseLoosen, false);
 
     context->api = StarfishMediaAPIs_create(NULL);
     if (context->api == NULL) {
@@ -68,6 +69,10 @@ static void DestroyPlayer(SS4S_PlayerContext *context) {
 
 static void SetWaitAudioVideoReady(SS4S_PlayerContext *context, bool wait) {
     context->waitAudioVideoReady = wait;
+}
+
+static void SetPanelPhaseLoosen(SS4S_PlayerContext *context, bool loosen) {
+    atomic_store(&context->panelPhaseLoosen, loosen);
 }
 
 bool StarfishPlayerLoadInner(SS4S_PlayerContext *ctx) {
@@ -357,7 +362,7 @@ static uint64_t StarfishPlayerMapBasePts(SS4S_PlayerContext *ctx, int64_t hostPt
 uint64_t StarfishPlayerNextVideoPts(SS4S_PlayerContext *ctx, int64_t hostPtsUs) {
     uint64_t wall = StarfishPlayerGetTime() - ctx->openTime;
     if (ctx->panelPhasePacing) {
-        bool loosen = SS4S_PlayerGetPanelPhaseLoosen(ctx->player);
+        bool loosen = atomic_load(&ctx->panelPhaseLoosen);
         if (!loosen) {
             if (!ctx->panelPhaseAnchored) {
                 ctx->panelPhaseAnchorNs = wall;
@@ -711,4 +716,5 @@ const SS4S_PlayerDriver StarfishPlayerDriver = {
     .Create = CreatePlayer,
     .Destroy = DestroyPlayer,
     .SetWaitAudioVideoReady = SetWaitAudioVideoReady,
+    .SetPanelPhaseLoosen = SetPanelPhaseLoosen,
 };
