@@ -4,8 +4,10 @@
 #include <stdint.h>
 #include <NDL_directmedia_v2.h>
 
+#include "ss4s/player.h"
 #include "ss4s/modapi.h"
 #include "ndl_logging.h"
+#include "../../common/panel_phase_pts.h"
 
 extern bool SS4S_NDL_webOS5_Initialized;
 extern pthread_mutex_t SS4S_NDL_webOS5_Lock;
@@ -32,6 +34,11 @@ struct SS4S_PlayerContext {
     double smoothIntervalMs;
     double smoothMaxDriftMs;
     double smoothLastPts;
+    /* Panel-phase pacing (wall-clock PTS, milliseconds). */
+    bool panelPhasePacing;
+    uint64_t panelPhaseIntervalMs;
+    uint64_t panelPhaseAnchorMs;
+    bool panelPhaseAnchored;
     /* Host presentationTimeUs → player PTS mapping (ms). */
     bool hostPtsAnchored;
     int64_t hostPtsAnchorUs;
