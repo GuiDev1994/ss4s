@@ -55,8 +55,20 @@ bool SS4S_PlayerGetVideoLatency(SS4S_Player *player, int avgIntervalUs, int *lat
  */
 bool SS4S_PlayerGetVideoRenderQueueLength(SS4S_Player *player, int *length);
 
+#ifdef __cplusplus
+}
+#endif
+
+#endif // SS4S_MODAPI_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /**
  * Temporarily bypass panel-phase PTS snapping when stream delivery is behind.
+ * Outside SS4S_MODAPI_H guard: modules include modapi.h (which defines the guard)
+ * before player.h via stats.h, so these must remain visible in that include order.
  */
 void SS4S_PlayerSetPanelPhaseLoosen(SS4S_Player *player, bool loosen);
 
@@ -65,5 +77,3 @@ bool SS4S_PlayerGetPanelPhaseLoosen(const SS4S_Player *player);
 #ifdef __cplusplus
 }
 #endif
-
-#endif // SS4S_MODAPI_H
