@@ -36,10 +36,10 @@ struct SS4S_PlayerContext {
     double smoothIntervalMs;
     double smoothMaxDriftMs;
     double smoothLastPts;
-    /* Panel-phase pacing (wall-clock PTS, milliseconds). */
+    /* Panel-phase pacing (internal µs; NDL PTS API uses ms at boundary). */
     bool panelPhasePacing;
-    uint64_t panelPhaseIntervalMs;
-    uint64_t panelPhaseAnchorMs;
+    uint64_t panelPhaseIntervalUs;
+    uint64_t panelPhaseAnchorUs;
     bool panelPhaseAnchored;
     /* Host presentationTimeUs → player PTS mapping (ms). */
     bool hostPtsAnchored;

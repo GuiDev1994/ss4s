@@ -76,34 +76,34 @@ void SS4S_NDL_webOS5_ConfigureSmoothPacing(SS4S_PlayerContext *context, int fpsN
     context->hostPtsPlayerAnchorMs = 0;
 
     context->panelPhasePacing = false;
-    context->panelPhaseIntervalMs = 0;
-    context->panelPhaseAnchorMs = 0;
+    context->panelPhaseIntervalUs = 0;
+    context->panelPhaseAnchorUs = 0;
     context->panelPhaseAnchored = false;
     {
         const char *panelPhase = getenv("SS4S_PANEL_PHASE_PACING");
         if (panelPhase != NULL && panelPhase[0] == '1') {
-            uint64_t intervalMs = 1000ULL / 60ULL;
+            uint64_t intervalUs = 1000000ULL / 60ULL;
             const char *intervalEnv = getenv("SS4S_PANEL_PHASE_INTERVAL_US");
             if (intervalEnv != NULL && intervalEnv[0] != '\0') {
                 long us = strtol(intervalEnv, NULL, 10);
                 if (us > 1000 && us < 100000) {
-                    intervalMs = (uint64_t) us / 1000ULL;
+                    intervalUs = (uint64_t) us;
                 } else if (fpsNum > 0 && fpsDen > 0) {
-                    intervalMs = (uint64_t) (1000.0 * (double) fpsDen / (double) fpsNum);
+                    intervalUs = (uint64_t) (1000000.0 * (double) fpsDen / (double) fpsNum);
                 }
             } else if (fpsNum > 0 && fpsDen > 0) {
-                intervalMs = (uint64_t) (1000.0 * (double) fpsDen / (double) fpsNum);
+                intervalUs = (uint64_t) (1000000.0 * (double) fpsDen / (double) fpsNum);
             }
-            if (intervalMs < 1) {
-                intervalMs = 1;
+            if (intervalUs < 1000ULL) {
+                intervalUs = 1000ULL;
             }
             context->panelPhasePacing = true;
-            context->panelPhaseIntervalMs = intervalMs;
+            context->panelPhaseIntervalUs = intervalUs;
             context->smoothPacing = false;
             enabled = false;
             SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
                                 "Panel-phase pacing interval=%.2fms",
-                                (double) context->panelPhaseIntervalMs);
+                                (double) context->panelPhaseIntervalUs / 1000.0);
         }
     }
 
@@ -170,14 +170,17 @@ uint64_t SS4S_NDL_webOS5_NextVideoPts(SS4S_PlayerContext *context, int64_t hostP
     if (context->panelPhasePacing) {
         bool loosen = atomic_load(&context->panelPhaseLoosen);
         if (!loosen) {
+            uint64_t wallUs = wall * 1000ULL;
             if (!context->panelPhaseAnchored) {
-                context->panelPhaseAnchorMs = wall;
+                context->panelPhaseAnchorUs = wallUs;
                 context->panelPhaseAnchored = true;
             }
-            uint64_t pts = SS4S_PanelPhaseSnapPts(
-                wall, context->panelPhaseAnchorMs, context->panelPhaseIntervalMs,
-                context->panelPhaseIntervalMs, (uint64_t) context->smoothLastPts, 1,
+            uint64_t lastPtsUs = (uint64_t) (context->smoothLastPts * 1000.0);
+            uint64_t ptsUs = SS4S_PanelPhaseSnapPts(
+                wallUs, context->panelPhaseAnchorUs, context->panelPhaseIntervalUs,
+                context->panelPhaseIntervalUs, lastPtsUs, 1000ULL,
                 &context->smoothPtsInitialized);
+            uint64_t pts = ptsUs / 1000ULL;
             context->smoothLastPts = (double) pts;
             return pts;
         }

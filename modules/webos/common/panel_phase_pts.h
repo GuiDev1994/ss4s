@@ -2,7 +2,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* Units must be consistent per caller (SMP=ns, NDL=ms). */
+/* Units must be consistent per caller (SMP=ns, NDL=µs). */
 static inline uint64_t SS4S_PanelPhaseSnapPts(uint64_t wall, uint64_t anchor, uint64_t interval,
                                              uint64_t max_hold, uint64_t last_pts, uint64_t min_step,
                                              bool *initialized) {
