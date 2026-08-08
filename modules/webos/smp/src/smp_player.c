@@ -1,6 +1,7 @@
 #include "smp_player.h"
 #include "smp_resource.h"
 #include "StarfishMediaAPIs_C.h"
+#include "../../common/panel_phase_pts.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -244,6 +245,38 @@ void StarfishPlayerConfigureSmoothPacing(SS4S_PlayerContext *ctx, int fpsNum, in
     ctx->hostPtsAnchorUs = 0;
     ctx->hostPtsPlayerAnchorNs = 0;
 
+    ctx->panelPhasePacing = false;
+    ctx->panelPhaseIntervalNs = 0;
+    ctx->panelPhaseAnchorNs = 0;
+    ctx->panelPhaseAnchored = false;
+    {
+        const char *panelPhase = getenv("SS4S_PANEL_PHASE_PACING");
+        if (panelPhase != NULL && panelPhase[0] == '1') {
+            uint64_t intervalNs = 1000000000ULL / 60ULL;
+            const char *intervalEnv = getenv("SS4S_PANEL_PHASE_INTERVAL_US");
+            if (intervalEnv != NULL && intervalEnv[0] != '\0') {
+                long us = strtol(intervalEnv, NULL, 10);
+                if (us > 1000 && us < 100000) {
+                    intervalNs = (uint64_t) us * 1000ULL;
+                } else if (fpsNum > 0 && fpsDen > 0) {
+                    intervalNs = (uint64_t) (1000000000.0 * (double) fpsDen / (double) fpsNum);
+                }
+            } else if (fpsNum > 0 && fpsDen > 0) {
+                intervalNs = (uint64_t) (1000000000.0 * (double) fpsDen / (double) fpsNum);
+            }
+            if (intervalNs < 1000000ULL) {
+                intervalNs = 1000000ULL;
+            }
+            ctx->panelPhasePacing = true;
+            ctx->panelPhaseIntervalNs = intervalNs;
+            ctx->smoothPacing = false;
+            enabled = false;
+            StarfishLibContext->Log(SS4S_LogLevelInfo, "SMP",
+                                    "Panel-phase pacing interval=%.2fms",
+                                    ctx->panelPhaseIntervalNs / 1000000.0);
+        }
+    }
+
     ctx->smoothHostOnly = false;
     ctx->presentationOffsetNs = 0;
     {
@@ -322,6 +355,23 @@ static uint64_t StarfishPlayerMapBasePts(SS4S_PlayerContext *ctx, int64_t hostPt
 }
 
 uint64_t StarfishPlayerNextVideoPts(SS4S_PlayerContext *ctx, int64_t hostPtsUs) {
+    uint64_t wall = StarfishPlayerGetTime() - ctx->openTime;
+    if (ctx->panelPhasePacing) {
+        bool loosen = false;
+        if (!loosen) {
+            if (!ctx->panelPhaseAnchored) {
+                ctx->panelPhaseAnchorNs = wall;
+                ctx->panelPhaseAnchored = true;
+            }
+            uint64_t pts = SS4S_PanelPhaseSnapPts(
+                wall, ctx->panelPhaseAnchorNs, ctx->panelPhaseIntervalNs,
+                ctx->panelPhaseIntervalNs, (uint64_t) ctx->smoothLastPts, 1000000ULL,
+                &ctx->smoothPtsInitialized);
+            ctx->smoothLastPts = (double) pts;
+            return pts;
+        }
+        return wall;
+    }
     uint64_t base = StarfishPlayerMapBasePts(ctx, hostPtsUs);
     if (!ctx->smoothPacing || ctx->smoothIntervalNs <= 0) {
         return base;

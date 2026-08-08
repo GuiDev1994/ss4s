@@ -45,6 +45,12 @@ struct SS4S_PlayerContext {
     double smoothMaxDriftNs;
     double smoothLastPts;
 
+    /* Panel-phase pacing (wall-clock PTS, nanoseconds). */
+    bool panelPhasePacing;
+    uint64_t panelPhaseIntervalNs;
+    uint64_t panelPhaseAnchorNs;
+    bool panelPhaseAnchored;
+
     /* Host presentationTimeUs → player PTS mapping. */
     bool hostPtsAnchored;
     int64_t hostPtsAnchorUs;
