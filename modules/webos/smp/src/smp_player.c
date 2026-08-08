@@ -357,7 +357,7 @@ static uint64_t StarfishPlayerMapBasePts(SS4S_PlayerContext *ctx, int64_t hostPt
 uint64_t StarfishPlayerNextVideoPts(SS4S_PlayerContext *ctx, int64_t hostPtsUs) {
     uint64_t wall = StarfishPlayerGetTime() - ctx->openTime;
     if (ctx->panelPhasePacing) {
-        bool loosen = false;
+        bool loosen = SS4S_PlayerGetPanelPhaseLoosen(ctx->player);
         if (!loosen) {
             if (!ctx->panelPhaseAnchored) {
                 ctx->panelPhaseAnchorNs = wall;

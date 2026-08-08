@@ -55,6 +55,13 @@ bool SS4S_PlayerGetVideoLatency(SS4S_Player *player, int avgIntervalUs, int *lat
  */
 bool SS4S_PlayerGetVideoRenderQueueLength(SS4S_Player *player, int *length);
 
+/**
+ * Temporarily bypass panel-phase PTS snapping when stream delivery is behind.
+ */
+void SS4S_PlayerSetPanelPhaseLoosen(SS4S_Player *player, bool loosen);
+
+bool SS4S_PlayerGetPanelPhaseLoosen(const SS4S_Player *player);
+
 #ifdef __cplusplus
 }
 #endif

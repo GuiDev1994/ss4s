@@ -12,6 +12,7 @@ SS4S_Player *SS4S_PlayerOpen() {
     player->mutex = SS4S_MutexCreate();
     SS4S_FeedGuardInit(&player->audio_guard);
     SS4S_FeedGuardInit(&player->video_guard);
+    atomic_init(&player->panelPhaseLoosen, false);
     const SS4S_PlayerDriver *audioPlayerDriver = SS4S_GetAudioPlayerDriver();
     const SS4S_PlayerDriver *videoPlayerDriver = SS4S_GetVideoPlayerDriver();
     if (audioPlayerDriver != videoPlayerDriver) {
@@ -122,4 +123,14 @@ bool SS4S_PlayerGetVideoLatency(SS4S_Player *player, int avgIntervalUs, int *lat
     }
     *latencyUs = result;
     return true;
+}
+
+void SS4S_PlayerSetPanelPhaseLoosen(SS4S_Player *player, bool loosen) {
+    assert(player != NULL);
+    atomic_store(&player->panelPhaseLoosen, loosen);
+}
+
+bool SS4S_PlayerGetPanelPhaseLoosen(const SS4S_Player *player) {
+    assert(player != NULL);
+    return atomic_load(&player->panelPhaseLoosen);
 }
