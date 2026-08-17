@@ -36,15 +36,19 @@ struct SS4S_PlayerContext {
     double smoothIntervalMs;
     double smoothMaxDriftMs;
     double smoothLastPts;
-    /* Panel-phase pacing (internal µs; NDL PTS API uses ms at boundary). */
+    /* Panel-phase pacing (internal µs; NDL PTS API uses ms at boundary). Always on. */
     bool panelPhasePacing;
     uint64_t panelPhaseIntervalUs;
-    uint64_t panelPhaseAnchorUs;
-    bool panelPhaseAnchored;
+    SS4S_PanelPhaseClock panelPhaseClock;
     /* Host presentationTimeUs → player PTS mapping (ms). */
     bool hostPtsAnchored;
     int64_t hostPtsAnchorUs;
     double hostPtsPlayerAnchorMs;
+    pthread_cond_t presentCond;
+    bool presentSeen;
+    bool presentGateEnabled;
+    unsigned presentTimeouts;
+    unsigned presentGen;
 };
 
 extern const SS4S_PlayerDriver SS4S_NDL_webOS5_PlayerDriver;
@@ -59,6 +63,9 @@ uint64_t SS4S_NDL_webOS5_GetPts(const SS4S_PlayerContext *context);
 
 /** Wall-clock / host-mapped PTS, optionally smoothed on a virtual grid. */
 uint64_t SS4S_NDL_webOS5_NextVideoPts(SS4S_PlayerContext *context, int64_t hostPtsUs);
+
+/** Wait for STARFISH RENDERED_FRAME. Caller holds SS4S_NDL_webOS5_Lock. */
+bool SS4S_NDL_webOS5_WaitPresent(SS4S_PlayerContext *context);
 
 void SS4S_NDL_webOS5_ConfigureSmoothPacing(SS4S_PlayerContext *context, int fpsNum, int fpsDen);
 

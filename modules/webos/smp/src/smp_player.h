@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ss4s/modapi.h"
+#include "../../common/panel_phase_pts.h"
 #include <pthread.h>
 #include <stdint.h>
 #include <stdatomic.h>
@@ -47,16 +48,22 @@ struct SS4S_PlayerContext {
     double smoothMaxDriftNs;
     double smoothLastPts;
 
-    /* Panel-phase pacing (wall-clock PTS, nanoseconds). */
+    /* Panel-phase pacing (wall-clock PTS, nanoseconds). Always on for webOS. */
     bool panelPhasePacing;
     uint64_t panelPhaseIntervalNs;
-    uint64_t panelPhaseAnchorNs;
-    bool panelPhaseAnchored;
+    SS4S_PanelPhaseClock panelPhaseClock;
 
     /* Host presentationTimeUs → player PTS mapping. */
     bool hostPtsAnchored;
     int64_t hostPtsAnchorUs;
     double hostPtsPlayerAnchorNs;
+
+    /* Present gate: wait for STARFISH_EVENT_RENDERED_FRAME before the next feed. */
+    pthread_cond_t presentCond;
+    bool presentSeen;
+    bool presentGateEnabled;
+    unsigned presentTimeouts;
+    unsigned presentGen;
 
     struct StarfishMediaAPIs_C *api;
     struct StarfishResource *res;

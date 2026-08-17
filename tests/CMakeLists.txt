@@ -30,6 +30,9 @@ ss4s_add_test(initialization SOURCES test_initialization.c)
 
 ss4s_add_test(player_panel_phase SOURCES test_player_panel_phase.c)
 
+add_executable(ss4s_test_panel_phase_pts test_panel_phase_pts.c)
+add_test(NAME panel_phase_pts COMMAND ss4s_test_panel_phase_pts)
+
 ss4s_add_test(feed_guard SOURCES test_feed_guard.c)
 
 ss4s_add_test(video_concurrent_lifecycle_dummy SOURCES test_video_concurrent_lifecycle.c ARGS dummy)

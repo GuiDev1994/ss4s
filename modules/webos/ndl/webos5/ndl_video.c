@@ -2,6 +2,7 @@
 #include "ndl_common.h"
 #include "highend_check.h"
 #include "max_res.h"
+#include "../../common/aurora_frame_diag.h"
 
 static SS4S_VideoOpenResult ReloadWithSize(SS4S_PlayerContext *context, int width, int height);
 
@@ -78,8 +79,26 @@ static SS4S_VideoFeedResult FeedVideoWithPTS(SS4S_VideoInstance *instance, const
     if (!context->mediaLoaded) {
         return SS4S_VIDEO_FEED_NOT_READY;
     }
+    pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
+    /* Never block the decode thread on RENDERED_FRAME — a late compositor
+     * callback cascades into the next feed interval (visible pan hitch).
+     * Panel-phase only rewrites PTS; NDL presents on its own timeline. */
     uint64_t pts = SS4S_NDL_webOS5_NextVideoPts(context, ptsUs);
+    const bool diag = AuroraFrameDiagEnabled();
+    int rq = -1;
+    if (diag) {
+        int length = 0;
+        if (NDL_DirectVideoGetRenderBufferLength(&length) == 0) {
+            rq = length;
+        }
+    }
+    pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
+    uint64_t submitStart = diag ? AuroraFrameDiagNowNs() : 0;
     int rc = NDL_DirectVideoPlay((void *) data, size, (long long) pts);
+    if (diag) {
+        AuroraFrameDiagLogFeedAt(pts, rq, submitStart,
+                                 (AuroraFrameDiagNowNs() - submitStart) / 1000ULL, (uint32_t) size);
+    }
     if (rc != 0) {
         SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL", "NDL_DirectVideoPlay returned %d: %s", rc,
                             NDL_DirectMediaGetError());

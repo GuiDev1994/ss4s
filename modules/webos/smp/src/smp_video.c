@@ -24,7 +24,8 @@ const char *StarfishVideoCodecName(SS4S_VideoCodec codec) {
 
 
 static bool GetVideoCapabilities(SS4S_VideoCapabilities *capabilities) {
-    capabilities->codecs = SS4S_VIDEO_H264 | SS4S_VIDEO_H265;
+    /* LG webOS 6+ Starfish advertises AV1 on OLED (C/G); enable for Aurora AV1 tests. */
+    capabilities->codecs = SS4S_VIDEO_H264 | SS4S_VIDEO_H265 | SS4S_VIDEO_AV1;
     capabilities->transform = SS4S_VIDEO_CAP_TRANSFORM_UI_COMPOSITING;
     capabilities->hdr = true;
     capabilities->colorSpace = SS4S_VIDEO_CAP_COLORSPACE_BT2020 | SS4S_VIDEO_CAP_COLORSPACE_BT709;
@@ -78,7 +79,11 @@ static SS4S_VideoFeedResult VideoFeedWithPTS(SS4S_VideoInstance *instance, const
         case SMP_FEED_NOT_READY:
             return SS4S_VIDEO_FEED_NOT_READY;
         case SMP_FEED_BUFFER_FULL:
-            return SS4S_VIDEO_FEED_REQUEST_KEYFRAME;
+            /* Do NOT map to REQUEST_KEYFRAME: an IDR during backpressure is larger
+             * than a P-frame and makes BufferFull worse (visible hitch on pan).
+             * Treat like NOT_READY — drop this frame; session_video asks for one
+             * IDR after Feed succeeds again. */
+            return SS4S_VIDEO_FEED_NOT_READY;
         default:
             return SS4S_VIDEO_FEED_ERROR;
     }

@@ -2,12 +2,14 @@
 #include "smp_resource.h"
 #include "StarfishMediaAPIs_C.h"
 #include "../../common/panel_phase_pts.h"
+#include "../../common/aurora_frame_diag.h"
 
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <time.h>
+#include <errno.h>
 
 static void LoadCallback(int type, int64_t numValue, const char *strValue, void *data);
 
@@ -22,6 +24,79 @@ static jvalue_ref AudioCreateAacInfo(const SS4S_AudioInfo *audioInfo);
 
 static jvalue_ref AudioCreateAc3PlusInfo(const SS4S_AudioInfo *audioInfo);
 
+static void TimespecAddNs(struct timespec *ts, uint64_t ns) {
+    ts->tv_sec += (time_t) (ns / 1000000000ULL);
+    ts->tv_nsec += (long) (ns % 1000000000ULL);
+    if (ts->tv_nsec >= 1000000000L) {
+        ts->tv_sec += 1;
+        ts->tv_nsec -= 1000000000L;
+    }
+}
+
+static bool PresentGateInit(SS4S_PlayerContext *ctx) {
+    /* webOS libpthread has no pthread_condattr_setclock; match CLOCK_REALTIME. */
+    int rc = pthread_cond_init(&ctx->presentCond, NULL);
+    ctx->presentGateEnabled = (rc == 0);
+    ctx->presentSeen = false;
+    ctx->presentTimeouts = 0;
+    ctx->presentGen = 0;
+    return rc == 0;
+}
+
+static void PresentGateReset(SS4S_PlayerContext *ctx) {
+    ctx->presentSeen = false;
+    ctx->presentTimeouts = 0;
+    ctx->presentGen = 0;
+}
+
+static bool PresentGateWait(SS4S_PlayerContext *ctx) {
+    if (!ctx->presentSeen || !ctx->presentGateEnabled) {
+        return false;
+    }
+    uint64_t waitNs = ctx->panelPhaseIntervalNs;
+    if (waitNs == 0) {
+        waitNs = 16000000ULL;
+    }
+    /* Wait at most 75% of a refresh so a late RENDERED_FRAME cannot skip the next vsync. */
+    waitNs = waitNs * 3ULL / 4ULL;
+    if (waitNs < 2000000ULL) {
+        waitNs = 2000000ULL;
+    }
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    TimespecAddNs(&ts, waitNs);
+    unsigned gen = ctx->presentGen;
+    while (ctx->presentGen == gen && ctx->presentGateEnabled) {
+        int rc = pthread_cond_timedwait(&ctx->presentCond, &ctx->lock, &ts);
+        if (rc == ETIMEDOUT) {
+            ctx->presentTimeouts++;
+            if (ctx->presentTimeouts >= 30) {
+                ctx->presentGateEnabled = false;
+                StarfishLibContext->Log(SS4S_LogLevelInfo, "SMP",
+                                        "RENDERED_FRAME not firing; present-gate off");
+            }
+            return false;
+        }
+        if (rc != 0) {
+            return false;
+        }
+    }
+    ctx->presentTimeouts = 0;
+    return ctx->presentGateEnabled;
+}
+
+static void PresentGateSignal(SS4S_PlayerContext *ctx, uint64_t wallNs) {
+    ctx->presentGen++;
+    if (!ctx->presentSeen) {
+        ctx->presentSeen = true;
+        StarfishLibContext->Log(SS4S_LogLevelInfo, "SMP",
+                                "RENDERED_FRAME present-gate armed wall=%llu ns",
+                                (unsigned long long) wallNs);
+    }
+    SS4S_PanelPhaseClockAlign(&ctx->panelPhaseClock, wallNs);
+    pthread_cond_signal(&ctx->presentCond);
+}
+
 static SS4S_PlayerContext *CreatePlayer(SS4S_Player *player) {
     const char *appId = getenv("APPID");
     if (appId == NULL) {
@@ -30,6 +105,9 @@ static SS4S_PlayerContext *CreatePlayer(SS4S_Player *player) {
     SS4S_PlayerContext *context = calloc(1, sizeof(SS4S_PlayerContext));
     context->appId = strdup(appId);
     pthread_mutex_init(&context->lock, NULL);
+    if (!PresentGateInit(context)) {
+        StarfishLibContext->Log(SS4S_LogLevelWarn, "SMP", "present-gate cond init failed");
+    }
     context->player = player;
     atomic_init(&context->panelPhaseLoosen, false);
 
@@ -37,6 +115,7 @@ static SS4S_PlayerContext *CreatePlayer(SS4S_Player *player) {
     if (context->api == NULL) {
         StarfishLibContext->Log(SS4S_LogLevelError, "SMP", "Failed to instantiate media APIs");
         free(context->appId);
+        pthread_cond_destroy(&context->presentCond);
         pthread_mutex_destroy(&context->lock);
         free(context);
         return NULL;
@@ -46,6 +125,7 @@ static SS4S_PlayerContext *CreatePlayer(SS4S_Player *player) {
         StarfishLibContext->Log(SS4S_LogLevelError, "SMP", "Failed to allocate resource");
         free(context->appId);
         StarfishMediaAPIs_destroy(context->api);
+        pthread_cond_destroy(&context->presentCond);
         pthread_mutex_destroy(&context->lock);
         free(context);
         return NULL;
@@ -57,12 +137,15 @@ static SS4S_PlayerContext *CreatePlayer(SS4S_Player *player) {
 
 static void DestroyPlayer(SS4S_PlayerContext *context) {
     pthread_mutex_lock(&context->lock);
+    context->presentGateEnabled = false;
+    pthread_cond_broadcast(&context->presentCond);
     if (context->api != NULL) {
         StarfishMediaAPIs_destroy(context->api);
     }
     StarfishResourceDestroy(context->res);
     free(context->appId);
     pthread_mutex_unlock(&context->lock);
+    pthread_cond_destroy(&context->presentCond);
     pthread_mutex_destroy(&context->lock);
     free(context);
 }
@@ -92,11 +175,14 @@ bool StarfishPlayerLoadInner(SS4S_PlayerContext *ctx) {
         result = true;
         StarfishLibContext->Log(SS4S_LogLevelInfo, "SMP", "Media loaded");
         ctx->state = SMP_STATE_LOADED;
+        AuroraFrameDiagBeginSession("smp");
         ctx->smoothPtsInitialized = false;
         ctx->smoothLastPts = 0;
         ctx->hostPtsAnchored = false;
         ctx->hostPtsAnchorUs = 0;
         ctx->hostPtsPlayerAnchorNs = 0;
+        PresentGateReset(ctx);
+        SS4S_PanelPhaseClockInit(&ctx->panelPhaseClock, ctx->panelPhaseIntervalNs);
         StarfishResourcePostLoad(ctx->res, &ctx->videoInfo);
     } else {
         StarfishLibContext->Log(SS4S_LogLevelError, "SMP", "Media load failed");
@@ -111,11 +197,14 @@ bool StarfishPlayerUnloadInner(SS4S_PlayerContext *ctx) {
         return false;
     }
     ctx->state = SMP_STATE_UNLOADED;
+    AuroraFrameDiagEndSession();
     ctx->smoothPtsInitialized = false;
     ctx->smoothLastPts = 0;
     ctx->hostPtsAnchored = false;
     ctx->hostPtsAnchorUs = 0;
     ctx->hostPtsPlayerAnchorNs = 0;
+    PresentGateReset(ctx);
+    SS4S_PanelPhaseClockInit(&ctx->panelPhaseClock, ctx->panelPhaseIntervalNs);
     if (state == SMP_STATE_PLAYING) {
         StarfishMediaAPIs_pushEOS(ctx->api);
     }
@@ -176,13 +265,29 @@ FeedResult StarfishPlayerFeedVideo(SS4S_PlayerContext *ctx, const unsigned char 
         return SMP_FEED_NOT_READY;
     }
     char payload[256], result[256];
+    /* Non-blocking PTS only — waiting on RENDERED_FRAME delayed the next feed. */
     uint64_t diff = StarfishPlayerNextVideoPts(ctx, hostPtsUs);
+    int rq = -1;
+    if (AuroraFrameDiagEnabled()) {
+        int length = 0;
+        if (StarfishMediaAPIs_getVideoRenderQueueLength(ctx->api, &length)) {
+            rq = length;
+        }
+        AuroraFrameDiagLogFeed(diff, rq);
+    }
     snprintf(payload, sizeof(payload), "{\"bufferAddr\":\"%p\",\"bufferSize\":%u,\"pts\":%llu,\"esData\":%d}",
              data, size, diff, 1);
     StarfishMediaAPIs_feed(ctx->api, payload, result, 256);
     if (strstr(result, "Ok") == NULL) {
         StarfishPlayerUnlock(ctx);
         if (strstr(result, "BufferFull") != NULL) {
+            static uint64_t last_bf_log_ns;
+            uint64_t now_ns = StarfishPlayerGetTime();
+            if (last_bf_log_ns == 0 || now_ns - last_bf_log_ns > 500000000ULL) {
+                last_bf_log_ns = now_ns;
+                StarfishLibContext->Log(SS4S_LogLevelInfo, "SMP",
+                                       "BufferFull — drop frame (no immediate IDR)");
+            }
             return SMP_FEED_BUFFER_FULL;
         }
         return SMP_FEED_ERROR;
@@ -250,35 +355,49 @@ void StarfishPlayerConfigureSmoothPacing(SS4S_PlayerContext *ctx, int fpsNum, in
     ctx->hostPtsAnchorUs = 0;
     ctx->hostPtsPlayerAnchorNs = 0;
 
-    ctx->panelPhasePacing = false;
-    ctx->panelPhaseIntervalNs = 0;
-    ctx->panelPhaseAnchorNs = 0;
-    ctx->panelPhaseAnchored = false;
+    uint64_t intervalNs = 1000000000ULL / 60ULL;
+    const char *intervalEnv = getenv("SS4S_PANEL_PHASE_INTERVAL_US");
+    if (intervalEnv != NULL && intervalEnv[0] != '\0') {
+        long us = strtol(intervalEnv, NULL, 10);
+        if (us > 1000 && us < 100000) {
+            intervalNs = (uint64_t) us * 1000ULL;
+        } else if (fpsNum > 0 && fpsDen > 0) {
+            intervalNs = (uint64_t) (1000000000.0 * (double) fpsDen / (double) fpsNum);
+        }
+    } else if (fpsNum > 0 && fpsDen > 0) {
+        intervalNs = (uint64_t) (1000000000.0 * (double) fpsDen / (double) fpsNum);
+    }
+    if (intervalNs < 1000000ULL) {
+        intervalNs = 1000000ULL;
+    }
+    /* Panel-phase is the stable default. Experimental frame pacer (punktfunk-style
+     * PTS smooth) is SS4S_SMOOTH_PACING=1 with SS4S_PANEL_PHASE_PACING=0. */
     {
-        const char *panelPhase = getenv("SS4S_PANEL_PHASE_PACING");
-        if (panelPhase != NULL && panelPhase[0] == '1') {
-            uint64_t intervalNs = 1000000000ULL / 60ULL;
-            const char *intervalEnv = getenv("SS4S_PANEL_PHASE_INTERVAL_US");
-            if (intervalEnv != NULL && intervalEnv[0] != '\0') {
-                long us = strtol(intervalEnv, NULL, 10);
-                if (us > 1000 && us < 100000) {
-                    intervalNs = (uint64_t) us * 1000ULL;
-                } else if (fpsNum > 0 && fpsDen > 0) {
-                    intervalNs = (uint64_t) (1000000000.0 * (double) fpsDen / (double) fpsNum);
-                }
-            } else if (fpsNum > 0 && fpsDen > 0) {
-                intervalNs = (uint64_t) (1000000000.0 * (double) fpsDen / (double) fpsNum);
-            }
-            if (intervalNs < 1000000ULL) {
-                intervalNs = 1000000ULL;
-            }
+        const char *panelEnv = getenv("SS4S_PANEL_PHASE_PACING");
+        bool panel = true;
+        if (panelEnv != NULL && panelEnv[0] != '\0') {
+            panel = !(panelEnv[0] == '0' || strcmp(panelEnv, "false") == 0 ||
+                      strcmp(panelEnv, "off") == 0 || strcmp(panelEnv, "FALSE") == 0 ||
+                      strcmp(panelEnv, "OFF") == 0);
+        }
+        if (panel) {
             ctx->panelPhasePacing = true;
             ctx->panelPhaseIntervalNs = intervalNs;
             ctx->smoothPacing = false;
             enabled = false;
+            SS4S_PanelPhaseClockInit(&ctx->panelPhaseClock, intervalNs);
             StarfishLibContext->Log(SS4S_LogLevelInfo, "SMP",
                                     "Panel-phase pacing interval=%.2fms",
                                     ctx->panelPhaseIntervalNs / 1000000.0);
+        } else {
+            ctx->panelPhasePacing = false;
+            ctx->panelPhaseIntervalNs = intervalNs;
+            ctx->smoothPacing = enabled;
+            SS4S_PanelPhaseClockInit(&ctx->panelPhaseClock, intervalNs);
+            StarfishLibContext->Log(SS4S_LogLevelInfo, "SMP",
+                                    "Experimental PTS smooth pacing %s (interval=%.2fms)",
+                                    enabled ? "ON" : "OFF",
+                                    intervalNs / 1000000.0);
         }
     }
 
@@ -300,20 +419,20 @@ void StarfishPlayerConfigureSmoothPacing(SS4S_PlayerContext *ctx, int fpsNum, in
         }
     }
 
-    double intervalNs = 1000000000.0 / 60.0;
-    const char *intervalEnv = SmoothPacingIntervalEnv();
-    if (intervalEnv != NULL && intervalEnv[0] != '\0') {
-        long us = strtol(intervalEnv, NULL, 10);
+    double legacyIntervalNs = 1000000000.0 / 60.0;
+    const char *legacyIntervalEnv = SmoothPacingIntervalEnv();
+    if (legacyIntervalEnv != NULL && legacyIntervalEnv[0] != '\0') {
+        long us = strtol(legacyIntervalEnv, NULL, 10);
         if (us > 1000 && us < 100000) {
-            intervalNs = (double) us * 1000.0;
+            legacyIntervalNs = (double) us * 1000.0;
         }
     } else if (fpsNum > 0 && fpsDen > 0) {
-        intervalNs = 1000000000.0 * (double) fpsDen / (double) fpsNum;
+        legacyIntervalNs = 1000000000.0 * (double) fpsDen / (double) fpsNum;
     }
-    if (intervalNs < 1000000.0) {
-        intervalNs = 1000000.0;
+    if (legacyIntervalNs < 1000000.0) {
+        legacyIntervalNs = 1000000.0;
     }
-    ctx->smoothIntervalNs = intervalNs;
+    ctx->smoothIntervalNs = legacyIntervalNs;
     double driftFrames = 0.5;
     const char *driftEnv = getenv("SS4S_SMOOTH_PACING_MAX_DRIFT_FRAMES");
     if (driftEnv != NULL && driftEnv[0] != '\0') {
@@ -322,7 +441,7 @@ void StarfishPlayerConfigureSmoothPacing(SS4S_PlayerContext *ctx, int fpsNum, in
             driftFrames = d;
         }
     }
-    ctx->smoothMaxDriftNs = intervalNs * driftFrames;
+    ctx->smoothMaxDriftNs = legacyIntervalNs * driftFrames;
 
     if (enabled && ctx->smoothHostOnly) {
         StarfishLibContext->Log(SS4S_LogLevelInfo, "SMP",
@@ -363,19 +482,16 @@ uint64_t StarfishPlayerNextVideoPts(SS4S_PlayerContext *ctx, int64_t hostPtsUs) 
     uint64_t wall = StarfishPlayerGetTime() - ctx->openTime;
     if (ctx->panelPhasePacing) {
         bool loosen = atomic_load(&ctx->panelPhaseLoosen);
-        if (!loosen) {
-            if (!ctx->panelPhaseAnchored) {
-                ctx->panelPhaseAnchorNs = wall;
-                ctx->panelPhaseAnchored = true;
-            }
-            uint64_t pts = SS4S_PanelPhaseSnapPts(
-                wall, ctx->panelPhaseAnchorNs, ctx->panelPhaseIntervalNs,
-                ctx->panelPhaseIntervalNs, (uint64_t) ctx->smoothLastPts, 1000000ULL,
-                &ctx->smoothPtsInitialized);
-            ctx->smoothLastPts = (double) pts;
-            return pts;
+        if (loosen) {
+            ctx->panelPhaseClock.last_pts = wall;
+            ctx->panelPhaseClock.last_emitted = wall;
+            ctx->panelPhaseClock.initialized = true;
+            ctx->smoothLastPts = (double) wall;
+            return wall;
         }
-        return wall;
+        uint64_t pts = SS4S_PanelPhaseClockNext(&ctx->panelPhaseClock, wall, 1000000ULL);
+        ctx->smoothLastPts = (double) pts;
+        return pts;
     }
     uint64_t base = StarfishPlayerMapBasePts(ctx, hostPtsUs);
     if (!ctx->smoothPacing || ctx->smoothIntervalNs <= 0) {
@@ -483,8 +599,10 @@ static void LoadCallback(int type, int64_t numValue, const char *strValue, void 
         }
         case STARFISH_EVENT_INT_BUFFERLOW:
         case STARFISH_EVENT_STR_BUFFERLOW:
+            AuroraFrameDiagLogEvent(type, numValue, strValue);
             break;
         case STARFISH_EVENT_STR_BUFFERFULL:
+            AuroraFrameDiagLogEvent(type, numValue, strValue);
             StarfishLibContext->Log(SS4S_LogLevelWarn, "SMP", "LoadCallback STARFISH_EVENT_STR_BUFFERFULL %s",
                                     strValue);
             break;
@@ -515,16 +633,28 @@ static void LoadCallback(int type, int64_t numValue, const char *strValue, void 
             StarfishPlayerUnlock(ctx);
             break;
         }
+        case STARFISH_EVENT_INT_NEED_DATA:
+        case STARFISH_EVENT_INT_ENOUGH_DATA:
+            AuroraFrameDiagLogEvent(type, numValue, strValue);
+            break;
         case STARFISH_EVENT_INT_SVP_VDEC_READY:
             break;
         case STARFISH_EVENT_DROPPED_FRAME: {
+            AuroraFrameDiagLogEvent(type, numValue, strValue);
             StarfishLibContext->Log(SS4S_LogLevelWarn, "SMP",
                                     "LoadCallback STARFISH_EVENT_DROPPED_FRAME, numValue: %lld, strValue: %p\n",
                                     numValue, strValue);
             break;
         }
-        case STARFISH_EVENT_RENDERED_FRAME:
+        case STARFISH_EVENT_RENDERED_FRAME: {
+            StarfishPlayerLock(ctx);
+            if (ctx->state == SMP_STATE_PLAYING || ctx->state == SMP_STATE_LOADED) {
+                uint64_t wall = StarfishPlayerGetTime() - ctx->openTime;
+                PresentGateSignal(ctx, wall);
+            }
+            StarfishPlayerUnlock(ctx);
             break;
+        }
         default:
             StarfishLibContext->Log(SS4S_LogLevelInfo, "SMP", "LoadCallback unhandled 0x%02x\n", type);
             break;

@@ -4,8 +4,11 @@
 #include <assert.h>
 #include <string.h>
 #include <stdio.h>
+#include <errno.h>
+#include <time.h>
 
 #include "opus_empty.h"
+#include "../../common/aurora_frame_diag.h"
 
 static SS4S_PlayerContext *CreatePlayerContext(SS4S_Player *player);
 
@@ -31,6 +34,80 @@ static int LoadMedia(SS4S_PlayerContext *context);
 static void LoadCallback(int type, long long numValue, const char *strValue);
 
 static SS4S_PlayerContext *ActivatePlayerContext = NULL;
+
+static void NdlTimespecAddNs(struct timespec *ts, uint64_t ns) {
+    ts->tv_sec += (time_t) (ns / 1000000000ULL);
+    ts->tv_nsec += (long) (ns % 1000000000ULL);
+    if (ts->tv_nsec >= 1000000000L) {
+        ts->tv_sec += 1;
+        ts->tv_nsec -= 1000000000L;
+    }
+}
+
+static bool NdlPresentGateInit(SS4S_PlayerContext *ctx) {
+    /* webOS libpthread has no pthread_condattr_setclock; match CLOCK_REALTIME. */
+    int rc = pthread_cond_init(&ctx->presentCond, NULL);
+    ctx->presentGateEnabled = (rc == 0);
+    ctx->presentSeen = false;
+    ctx->presentTimeouts = 0;
+    ctx->presentGen = 0;
+    return rc == 0;
+}
+
+static void NdlPresentGateReset(SS4S_PlayerContext *ctx) {
+    ctx->presentSeen = false;
+    ctx->presentTimeouts = 0;
+    ctx->presentGen = 0;
+}
+
+bool SS4S_NDL_webOS5_WaitPresent(SS4S_PlayerContext *ctx) {
+    if (!ctx->presentSeen || !ctx->presentGateEnabled) {
+        return false;
+    }
+    uint64_t waitNs = ctx->panelPhaseIntervalUs * 1000ULL;
+    if (waitNs == 0) {
+        waitNs = 16000000ULL;
+    }
+    /* Wait at most 75% of a refresh so a late RENDERED_FRAME cannot skip the next vsync. */
+    waitNs = waitNs * 3ULL / 4ULL;
+    if (waitNs < 2000000ULL) {
+        waitNs = 2000000ULL;
+    }
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    NdlTimespecAddNs(&ts, waitNs);
+    unsigned gen = ctx->presentGen;
+    while (ctx->presentGen == gen && ctx->presentGateEnabled) {
+        int rc = pthread_cond_timedwait(&ctx->presentCond, &SS4S_NDL_webOS5_Lock, &ts);
+        if (rc == ETIMEDOUT) {
+            ctx->presentTimeouts++;
+            if (ctx->presentTimeouts >= 30) {
+                ctx->presentGateEnabled = false;
+                SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
+                                    "RENDERED_FRAME not firing; present-gate off");
+            }
+            return false;
+        }
+        if (rc != 0) {
+            return false;
+        }
+    }
+    ctx->presentTimeouts = 0;
+    return ctx->presentGateEnabled;
+}
+
+static void NdlPresentGateSignal(SS4S_PlayerContext *ctx) {
+    uint64_t wallUs = SS4S_NDL_webOS5_GetPts(ctx) * 1000ULL;
+    ctx->presentGen++;
+    if (!ctx->presentSeen) {
+        ctx->presentSeen = true;
+        SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
+                            "RENDERED_FRAME present-gate armed wall=%llu us",
+                            (unsigned long long) wallUs);
+    }
+    SS4S_PanelPhaseClockAlign(&ctx->panelPhaseClock, wallUs);
+    pthread_cond_signal(&ctx->presentCond);
+}
 
 int SS4S_NDL_webOS5_ReloadMedia(SS4S_PlayerContext *context) {
     SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "Reloading media");
@@ -75,35 +152,47 @@ void SS4S_NDL_webOS5_ConfigureSmoothPacing(SS4S_PlayerContext *context, int fpsN
     context->hostPtsAnchorUs = 0;
     context->hostPtsPlayerAnchorMs = 0;
 
-    context->panelPhasePacing = false;
-    context->panelPhaseIntervalUs = 0;
-    context->panelPhaseAnchorUs = 0;
-    context->panelPhaseAnchored = false;
+    uint64_t intervalUs = 1000000ULL / 60ULL;
+    const char *intervalEnv = getenv("SS4S_PANEL_PHASE_INTERVAL_US");
+    if (intervalEnv != NULL && intervalEnv[0] != '\0') {
+        long us = strtol(intervalEnv, NULL, 10);
+        if (us > 1000 && us < 100000) {
+            intervalUs = (uint64_t) us;
+        } else if (fpsNum > 0 && fpsDen > 0) {
+            intervalUs = (uint64_t) (1000000.0 * (double) fpsDen / (double) fpsNum);
+        }
+    } else if (fpsNum > 0 && fpsDen > 0) {
+        intervalUs = (uint64_t) (1000000.0 * (double) fpsDen / (double) fpsNum);
+    }
+    if (intervalUs < 1000ULL) {
+        intervalUs = 1000ULL;
+    }
     {
-        const char *panelPhase = getenv("SS4S_PANEL_PHASE_PACING");
-        if (panelPhase != NULL && panelPhase[0] == '1') {
-            uint64_t intervalUs = 1000000ULL / 60ULL;
-            const char *intervalEnv = getenv("SS4S_PANEL_PHASE_INTERVAL_US");
-            if (intervalEnv != NULL && intervalEnv[0] != '\0') {
-                long us = strtol(intervalEnv, NULL, 10);
-                if (us > 1000 && us < 100000) {
-                    intervalUs = (uint64_t) us;
-                } else if (fpsNum > 0 && fpsDen > 0) {
-                    intervalUs = (uint64_t) (1000000.0 * (double) fpsDen / (double) fpsNum);
-                }
-            } else if (fpsNum > 0 && fpsDen > 0) {
-                intervalUs = (uint64_t) (1000000.0 * (double) fpsDen / (double) fpsNum);
-            }
-            if (intervalUs < 1000ULL) {
-                intervalUs = 1000ULL;
-            }
+        const char *panelEnv = getenv("SS4S_PANEL_PHASE_PACING");
+        bool panel = true;
+        if (panelEnv != NULL && panelEnv[0] != '\0') {
+            panel = !(panelEnv[0] == '0' || strcmp(panelEnv, "false") == 0 ||
+                      strcmp(panelEnv, "off") == 0 || strcmp(panelEnv, "FALSE") == 0 ||
+                      strcmp(panelEnv, "OFF") == 0);
+        }
+        if (panel) {
             context->panelPhasePacing = true;
             context->panelPhaseIntervalUs = intervalUs;
             context->smoothPacing = false;
             enabled = false;
+            SS4S_PanelPhaseClockInit(&context->panelPhaseClock, intervalUs);
             SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
                                 "Panel-phase pacing interval=%.2fms",
                                 (double) context->panelPhaseIntervalUs / 1000.0);
+        } else {
+            context->panelPhasePacing = false;
+            context->panelPhaseIntervalUs = intervalUs;
+            context->smoothPacing = enabled;
+            SS4S_PanelPhaseClockInit(&context->panelPhaseClock, intervalUs);
+            SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
+                                "Experimental PTS smooth pacing %s (interval=%.2fms)",
+                                enabled ? "ON" : "OFF",
+                                (double) intervalUs / 1000.0);
         }
     }
 
@@ -126,12 +215,12 @@ void SS4S_NDL_webOS5_ConfigureSmoothPacing(SS4S_PlayerContext *context, int fpsN
     }
 
     double intervalMs = 1000.0 / 60.0;
-    const char *intervalEnv = getenv("SS4S_SMOOTH_PACING_INTERVAL_US");
-    if (intervalEnv == NULL || intervalEnv[0] == '\0') {
-        intervalEnv = getenv("SS4S_NDL_PACING_INTERVAL_US");
+    const char *legacyIntervalEnv = getenv("SS4S_SMOOTH_PACING_INTERVAL_US");
+    if (legacyIntervalEnv == NULL || legacyIntervalEnv[0] == '\0') {
+        legacyIntervalEnv = getenv("SS4S_NDL_PACING_INTERVAL_US");
     }
-    if (intervalEnv != NULL && intervalEnv[0] != '\0') {
-        long us = strtol(intervalEnv, NULL, 10);
+    if (legacyIntervalEnv != NULL && legacyIntervalEnv[0] != '\0') {
+        long us = strtol(legacyIntervalEnv, NULL, 10);
         if (us > 1000 && us < 100000) {
             intervalMs = (double) us / 1000.0;
         }
@@ -169,22 +258,18 @@ uint64_t SS4S_NDL_webOS5_NextVideoPts(SS4S_PlayerContext *context, int64_t hostP
     uint64_t wall = SS4S_NDL_webOS5_GetPts(context);
     if (context->panelPhasePacing) {
         bool loosen = atomic_load(&context->panelPhaseLoosen);
-        if (!loosen) {
-            uint64_t wallUs = wall * 1000ULL;
-            if (!context->panelPhaseAnchored) {
-                context->panelPhaseAnchorUs = wallUs;
-                context->panelPhaseAnchored = true;
-            }
-            uint64_t lastPtsUs = (uint64_t) (context->smoothLastPts * 1000.0);
-            uint64_t ptsUs = SS4S_PanelPhaseSnapPts(
-                wallUs, context->panelPhaseAnchorUs, context->panelPhaseIntervalUs,
-                context->panelPhaseIntervalUs, lastPtsUs, 1000ULL,
-                &context->smoothPtsInitialized);
-            uint64_t pts = ptsUs / 1000ULL;
-            context->smoothLastPts = (double) pts;
-            return pts;
+        uint64_t wallUs = wall * 1000ULL;
+        if (loosen) {
+            context->panelPhaseClock.last_pts = wallUs;
+            context->panelPhaseClock.last_emitted = wallUs;
+            context->panelPhaseClock.initialized = true;
+            context->smoothLastPts = (double) wall;
+            return wall;
         }
-        return wall;
+        uint64_t ptsUs = SS4S_PanelPhaseClockNext(&context->panelPhaseClock, wallUs, 1000ULL);
+        uint64_t pts = ptsUs / 1000ULL;
+        context->smoothLastPts = (double) pts;
+        return pts;
     }
     uint64_t base = wall;
     if (context->smoothPacing && hostPtsUs >= 0) {
@@ -245,15 +330,23 @@ static SS4S_PlayerContext *CreatePlayerContext(SS4S_Player *player) {
     SS4S_PlayerContext *created = calloc(1, sizeof(SS4S_PlayerContext));
     created->player = player;
     atomic_init(&created->panelPhaseLoosen, false);
+    if (!NdlPresentGateInit(created)) {
+        SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL", "present-gate cond init failed");
+    }
     ActivatePlayerContext = created;
     return created;
 }
 
 static void DestroyPlayerContext(SS4S_PlayerContext *context) {
-    UnloadMedia(context);
-    free(context);
     assert(context == ActivatePlayerContext);
+    pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
+    context->presentGateEnabled = false;
+    pthread_cond_broadcast(&context->presentCond);
+    pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
+    UnloadMedia(context);
+    pthread_cond_destroy(&context->presentCond);
     ActivatePlayerContext = NULL;
+    free(context);
 }
 
 static void PlayerSetWaitAudioVideoReady(SS4S_PlayerContext *context, bool option) {
@@ -269,6 +362,7 @@ static int UnloadMedia(SS4S_PlayerContext *context) {
     if (context->mediaLoaded) {
         SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "Unloading media");
         context->mediaLoaded = false;
+        AuroraFrameDiagEndSession();
         ret = NDL_DirectMediaUnload();
     }
     return ret;
@@ -318,12 +412,15 @@ static int LoadMedia(SS4S_PlayerContext *context) {
     }
 
     context->mediaLoaded = true;
+    AuroraFrameDiagBeginSession("ndl");
     clock_gettime(CLOCK_MONOTONIC, &context->mediaLoadedTime);
     context->smoothPtsInitialized = false;
     context->smoothLastPts = 0;
     context->hostPtsAnchored = false;
     context->hostPtsAnchorUs = 0;
     context->hostPtsPlayerAnchorMs = 0;
+    NdlPresentGateReset(context);
+    SS4S_PanelPhaseClockInit(&context->panelPhaseClock, context->panelPhaseIntervalUs);
     context->lastFrameTime = 0;
     return ret;
 }
@@ -341,6 +438,15 @@ static void LoadCallback(int type, long long numValue, const char *strValue) {
         }
         case 0x1a: {
             SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "%s STATE_UPDATE_PLAYING: %s", __FUNCTION__, strValue);
+            break;
+        }
+        case 0x31: {
+            pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
+            if (ActivatePlayerContext != NULL && ActivatePlayerContext->mediaLoaded) {
+                NdlPresentGateSignal(ActivatePlayerContext);
+            }
+            pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
+            AuroraFrameDiagLogEvent(type, numValue, strValue);
             break;
         }
         default: {

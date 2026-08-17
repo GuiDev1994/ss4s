@@ -1,5 +1,5 @@
 ss4s_add_module(ndl-webos5 FOR_AUDIO FOR_VIDEO IN_GROUP ndl DISPLAY_NAME "webOS NDL"
-        SOURCES ndl_module.c ndl_player.c ndl_audio.c ndl_video.c
+        SOURCES ndl_module.c ndl_player.c ndl_audio.c ndl_video.c ../../common/aurora_frame_diag.c
         WEIGHT 50 CONFLICTS lgnc OS_VERSION ">=5")
 if (NOT SS4S_MODULE_TARGET)
     return()
@@ -27,6 +27,7 @@ set_target_properties(ss4s-opus-fix PROPERTIES
 
 
 target_include_directories(${SS4S_MODULE_TARGET} SYSTEM PRIVATE ${NDL_DIRECTMEDIA_INCLUDE_DIRS} ${OPUS_INCLUDE_DIRS})
+target_include_directories(${SS4S_MODULE_TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../common)
 target_link_libraries(${SS4S_MODULE_TARGET} PRIVATE ${NDL_DIRECTMEDIA_LIBRARIES} ${OPUS_LIBRARIES}
         pthread dl ss4s-opus-empty ss4s-opus-fix ss4s-webos-utils)
 target_compile_definitions(${SS4S_MODULE_TARGET} PRIVATE NDL_DIRECTMEDIA_API_VERSION=2 _GNU_SOURCE)

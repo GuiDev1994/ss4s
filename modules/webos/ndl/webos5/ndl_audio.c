@@ -1,10 +1,13 @@
 #include <stddef.h>
 #include <dlfcn.h>
 #include <string.h>
+#include <stdlib.h>
+#include <stdint.h>
 
 #include "ndl_common.h"
 #include "opus_empty.h"
 #include "opus_fix.h"
+#include "../../common/webos_pcm_51_remap.h"
 
 static bool IsOpusPassthroughSupported(const OpusConfig *config);
 
@@ -133,12 +136,12 @@ static SS4S_AudioOpenResult OpenAudio(const SS4S_AudioInfo *info, SS4S_AudioInst
 
 static SS4S_AudioFeedResult FeedAudio(SS4S_AudioInstance *instance, const unsigned char *data, size_t size) {
     pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
-    const SS4S_PlayerContext *context = (void *) instance;
+    SS4S_PlayerContext *context = (void *) instance;
     if (!context->mediaLoaded) {
         pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
         return SS4S_AUDIO_FEED_NOT_READY;
     }
-    int rc;
+    int16_t *remap_owned = NULL;
     if (context->opusFix) {
         int fixedSize = SS4S_NDLOpusFixProcess(context->opusFix, data, size);
         if (fixedSize < 0) {
@@ -148,9 +151,20 @@ static SS4S_AudioFeedResult FeedAudio(SS4S_AudioInstance *instance, const unsign
         }
         data = SS4S_NDLOpusFixGetBuffer(context->opusFix);
         size = fixedSize;
+    } else if (context->mediaInfo.audio.pcm.type == NDL_AUDIO_TYPE_PCM &&
+               context->mediaInfo.audio.pcm.channelMode != NULL &&
+               strncmp(context->mediaInfo.audio.pcm.channelMode, "6-channel", 10) == 0 &&
+               size >= 6 * sizeof(int16_t) && (size % (6 * sizeof(int16_t))) == 0) {
+        int frames = (int) (size / (6 * sizeof(int16_t)));
+        remap_owned = malloc(size);
+        if (remap_owned != NULL) {
+            SS4S_WebOS_RemapPcm51ToDevice((const int16_t *) data, remap_owned, frames);
+            data = (const unsigned char *) remap_owned;
+        }
     }
     uint64_t pts = SS4S_NDL_webOS5_GetPts(context);
-    rc = NDL_DirectAudioPlay((void *) data, size, (long long) pts);
+    int rc = NDL_DirectAudioPlay((void *) data, size, (long long) pts);
+    free(remap_owned);
     if (rc != 0) {
         SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL", "NDL_DirectAudioPlay returned %d: %s", rc,
                             NDL_DirectMediaGetError());
