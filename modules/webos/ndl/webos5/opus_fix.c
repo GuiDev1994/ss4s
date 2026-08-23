@@ -36,6 +36,14 @@ SS4S_NDLOpusFix *SS4S_NDLOpusFixCreate(const OpusConfig *config) {
         SS4S_NDLOpusFixDestroy(instance);
         return NULL;
     }
+    /* This runs 200x/s on a TV SoC that is already saturated by 4K120 receive.
+     * Default complexity costs enough CPU to starve the RTP reader and drop
+     * audio (#59, #66); complexity 0 at a high CBR keeps the transcode cheap
+     * and effectively transparent. */
+    opus_multistream_encoder_ctl(instance->encoder, OPUS_SET_COMPLEXITY(0));
+    opus_multistream_encoder_ctl(instance->encoder, OPUS_SET_BITRATE(512000));
+    opus_multistream_encoder_ctl(instance->encoder, OPUS_SET_VBR(0));
+    opus_multistream_encoder_ctl(instance->encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
     return instance;
 }
 

@@ -99,6 +99,13 @@ static SS4S_AudioOpenResult OpenAudio(const SS4S_AudioInfo *info, SS4S_AudioInst
                     result = SS4S_AUDIO_OPEN_ERROR;
                     goto finish;
                 }
+                if (opusConfig.channels == 6) {
+                    SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
+                                        "Opus 5.1 streams=%d coupled=%d mapping=[%u,%u,%u,%u,%u,%u]",
+                                        opusConfig.streamCount, opusConfig.coupledCount,
+                                        opusConfig.mapping[0], opusConfig.mapping[1], opusConfig.mapping[2],
+                                        opusConfig.mapping[3], opusConfig.mapping[4], opusConfig.mapping[5]);
+                }
                 if (opusConfig.channels == 6 && !IsOpusPassthroughSupported(&opusConfig)) {
                     SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL",
                                         "Channel config is not supported, enabling re-encoding. "
@@ -108,6 +115,8 @@ static SS4S_AudioOpenResult OpenAudio(const SS4S_AudioInfo *info, SS4S_AudioInst
                         result = SS4S_AUDIO_OPEN_ERROR;
                         goto finish;
                     }
+                } else if (opusConfig.channels == 6) {
+                    SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "Opus 5.1 passthrough (no re-encode)");
                 }
             }
             context->mediaInfo.audio.opus = opusInfo;
@@ -132,18 +141,18 @@ static SS4S_AudioOpenResult OpenAudio(const SS4S_AudioInfo *info, SS4S_AudioInst
 }
 
 static SS4S_AudioFeedResult FeedAudio(SS4S_AudioInstance *instance, const unsigned char *data, size_t size) {
-    pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
     SS4S_PlayerContext *context = (void *) instance;
     if (!context->mediaLoaded) {
-        pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
         return SS4S_AUDIO_FEED_NOT_READY;
     }
+    /* Transcode and remap before taking the lock: holding it across an Opus
+     * re-encode blocks the video feed for the whole encode. Close only runs
+     * after Limelight joins the audio threads, so the instances stay valid. */
     int16_t *remap_owned = NULL;
     if (context->opusFix) {
         int fixedSize = SS4S_NDLOpusFixProcess(context->opusFix, data, size);
         if (fixedSize < 0) {
             SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL", "SS4S_NDLOpusFixProcess returned %d", fixedSize);
-            pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
             return SS4S_AUDIO_FEED_ERROR;
         }
         data = SS4S_NDLOpusFixGetBuffer(context->opusFix);
@@ -158,6 +167,12 @@ static SS4S_AudioFeedResult FeedAudio(SS4S_AudioInstance *instance, const unsign
             SS4S_WebOS_RemapPcm51ToDevice((const int16_t *) data, remap_owned, frames);
             data = (const unsigned char *) remap_owned;
         }
+    }
+    pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
+    if (!context->mediaLoaded) {
+        pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
+        free(remap_owned);
+        return SS4S_AUDIO_FEED_NOT_READY;
     }
     uint64_t pts = SS4S_NDL_webOS5_GetPts(context);
     int rc = NDL_DirectAudioPlay((void *) data, size, (long long) pts);

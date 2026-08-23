@@ -35,6 +35,140 @@ static void LoadCallback(int type, long long numValue, const char *strValue);
 
 static SS4S_PlayerContext *ActivatePlayerContext = NULL;
 
+/*
+ * Render-buffer pacing.
+ *
+ * NDL's only video entry point is Play(buffer, size, pts). Aurora has always passed
+ * "now" as the PTS, which tells the renderer the frame is already due, so it shows it
+ * immediately and its render buffer never fills. With an empty buffer the renderer has
+ * nothing in hand when a vsync arrives, so presentation phase simply follows arrival
+ * phase and no amount of client-side scheduling can align it — which is why every
+ * previous pacing attempt measured as no change.
+ *
+ * Here the PTS is instead placed `renderQueueTarget` frames in the future, advancing on
+ * the host capture clock. The renderer then holds frames and releases them on its own
+ * vsync, which is the only place on this platform where a real V-Sync can happen.
+ * `renderTrimMs` is a slow integrator on the observed queue depth that absorbs the
+ * host/TV clock difference without moving presentation visibly.
+ */
+#define NDL_RENDER_TRIM_STEP_MS 0.05
+#define NDL_RENDER_TRIM_LIMIT_FRAMES 1.5
+
+static void ConfigureRenderPacing(SS4S_PlayerContext *context, int fpsNum, int fpsDen) {
+    int target = 0;
+    const char *targetEnv = getenv("SS4S_RENDER_QUEUE_TARGET");
+    if (targetEnv != NULL && targetEnv[0] != '\0') {
+        long frames = strtol(targetEnv, NULL, 10);
+        if (frames > 0 && frames <= 8) {
+            target = (int) frames;
+        }
+    }
+    double frameMs = 1000.0 / 60.0;
+    if (fpsNum > 0 && fpsDen > 0) {
+        frameMs = 1000.0 * (double) fpsDen / (double) fpsNum;
+    }
+    if (frameMs < 1.0) {
+        frameMs = 1.0;
+    }
+    context->renderQueueTarget = target;
+    context->renderFrameMs = frameMs;
+    if (target > 0) {
+        SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
+                            "Render pacing on: target=%d frames, frame=%.3fms, lead=%.1fms",
+                            target, frameMs, target * frameMs);
+    } else {
+        SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "Render pacing off (PTS = now)");
+    }
+}
+
+static void ResetRenderPacing(SS4S_PlayerContext *context) {
+    context->renderAnchored = false;
+    context->renderHostAnchorUs = 0;
+    context->renderAnchorMs = 0;
+    context->renderLastPts = 0;
+    context->renderTrimMs = 0;
+    context->renderFrames = 0;
+    context->renderQueueSum = 0;
+    context->renderStarved = 0;
+    context->renderResyncs = 0;
+    context->renderQueueMax = 0;
+}
+
+bool SS4S_NDL_webOS5_RenderPacingEnabled(const SS4S_PlayerContext *context) {
+    return context->renderQueueTarget > 0;
+}
+
+void SS4S_NDL_webOS5_LogRenderPacing(const SS4S_PlayerContext *context) {
+    if (context->renderQueueTarget <= 0 || context->renderFrames == 0) {
+        return;
+    }
+    SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
+                        "Render pacing: %llu frames, queue avg %.2f max %d (target %d), "
+                        "%llu starved (%.1f%%), %llu resyncs, trim %.1fms",
+                        (unsigned long long) context->renderFrames,
+                        (double) context->renderQueueSum / (double) context->renderFrames,
+                        context->renderQueueMax, context->renderQueueTarget,
+                        (unsigned long long) context->renderStarved,
+                        100.0 * (double) context->renderStarved / (double) context->renderFrames,
+                        (unsigned long long) context->renderResyncs, context->renderTrimMs);
+}
+
+uint64_t SS4S_NDL_webOS5_RenderPacedPts(SS4S_PlayerContext *context, int64_t hostPtsUs, int queueLen) {
+    const double wall = (double) SS4S_NDL_webOS5_GetPts(context);
+    const double lead = context->renderQueueTarget * context->renderFrameMs;
+    if (hostPtsUs < 0) {
+        /* No host clock: the best we can do is a constant offset from arrival. */
+        return (uint64_t) (wall + lead + 0.5);
+    }
+    if (!context->renderAnchored) {
+        context->renderAnchored = true;
+        context->renderHostAnchorUs = hostPtsUs;
+        context->renderAnchorMs = wall + lead;
+        context->renderTrimMs = 0;
+        context->renderLastPts = 0;
+        SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
+                            "Render pacing anchored hostUs=%lld playerMs=%.1f lead=%.1fms",
+                            (long long) hostPtsUs, context->renderAnchorMs, lead);
+    }
+
+    /* Steer the queue back to target slowly enough to stay below the visible threshold. */
+    if (queueLen >= 0) {
+        const double trimLimit = NDL_RENDER_TRIM_LIMIT_FRAMES * context->renderFrameMs;
+        if (queueLen < context->renderQueueTarget && context->renderTrimMs < trimLimit) {
+            context->renderTrimMs += NDL_RENDER_TRIM_STEP_MS;
+        } else if (queueLen > context->renderQueueTarget && context->renderTrimMs > -trimLimit) {
+            context->renderTrimMs -= NDL_RENDER_TRIM_STEP_MS;
+        }
+        context->renderQueueSum += (uint64_t) queueLen;
+        if (queueLen > context->renderQueueMax) {
+            context->renderQueueMax = queueLen;
+        }
+        if (queueLen == 0) {
+            context->renderStarved++;
+        }
+    }
+    context->renderFrames++;
+
+    double pts = context->renderAnchorMs + context->renderTrimMs +
+                 (double) (hostPtsUs - context->renderHostAnchorUs) / 1000.0;
+
+    /* A stall, IDR gap or host clock jump leaves the mapping meaningless. */
+    const double behind = wall - pts;
+    const double ahead = pts - wall;
+    if (behind > context->renderFrameMs || ahead > lead + 4.0 * context->renderFrameMs) {
+        context->renderHostAnchorUs = hostPtsUs;
+        context->renderAnchorMs = wall + lead;
+        context->renderTrimMs = 0;
+        context->renderResyncs++;
+        pts = context->renderAnchorMs;
+    }
+    if (pts <= context->renderLastPts) {
+        pts = context->renderLastPts + 1.0;
+    }
+    context->renderLastPts = pts;
+    return (uint64_t) (pts + 0.5);
+}
+
 static void NdlTimespecAddNs(struct timespec *ts, uint64_t ns) {
     ts->tv_sec += (time_t) (ns / 1000000000ULL);
     ts->tv_nsec += (long) (ns % 1000000000ULL);
@@ -241,6 +375,8 @@ void SS4S_NDL_webOS5_ConfigureSmoothPacing(SS4S_PlayerContext *context, int fpsN
     }
     context->smoothMaxDriftMs = intervalMs * driftFrames;
 
+    ConfigureRenderPacing(context, fpsNum, fpsDen);
+
     if (enabled && context->smoothHostOnly) {
         SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
                             "Smooth pacing host-PTS-only offset=%.2fms (no interval grid)",
@@ -361,6 +497,7 @@ static int UnloadMedia(SS4S_PlayerContext *context) {
     int ret = 0;
     if (context->mediaLoaded) {
         SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "Unloading media");
+        SS4S_NDL_webOS5_LogRenderPacing(context);
         context->mediaLoaded = false;
         AuroraFrameDiagEndSession();
         ret = NDL_DirectMediaUnload();
@@ -420,6 +557,7 @@ static int LoadMedia(SS4S_PlayerContext *context) {
     context->hostPtsAnchorUs = 0;
     context->hostPtsPlayerAnchorMs = 0;
     NdlPresentGateReset(context);
+    ResetRenderPacing(context);
     SS4S_PanelPhaseClockInit(&context->panelPhaseClock, context->panelPhaseIntervalUs);
     context->lastFrameTime = 0;
     return ret;

@@ -81,16 +81,20 @@ static SS4S_VideoFeedResult FeedVideoWithPTS(SS4S_VideoInstance *instance, const
     }
     pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
     /* Never block the decode thread on RENDERED_FRAME — a late compositor
-     * callback cascades into the next feed interval (visible pan hitch).
-     * Panel-phase only rewrites PTS; NDL presents on its own timeline. */
-    uint64_t pts = SS4S_NDL_webOS5_NextVideoPts(context, ptsUs);
+     * callback cascades into the next feed interval (visible pan hitch). */
+    const bool paced = SS4S_NDL_webOS5_RenderPacingEnabled(context);
     const bool diag = AuroraFrameDiagEnabled();
     int rq = -1;
-    if (diag) {
+    if (paced || diag) {
         int length = 0;
         if (NDL_DirectVideoGetRenderBufferLength(&length) == 0) {
             rq = length;
         }
+    }
+    uint64_t pts = paced ? SS4S_NDL_webOS5_RenderPacedPts(context, ptsUs, rq)
+                         : SS4S_NDL_webOS5_NextVideoPts(context, ptsUs);
+    if (paced && context->renderFrames % 3600 == 0) {
+        SS4S_NDL_webOS5_LogRenderPacing(context);
     }
     pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
     uint64_t submitStart = diag ? AuroraFrameDiagNowNs() : 0;

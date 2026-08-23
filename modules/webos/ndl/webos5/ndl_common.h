@@ -44,6 +44,19 @@ struct SS4S_PlayerContext {
     bool hostPtsAnchored;
     int64_t hostPtsAnchorUs;
     double hostPtsPlayerAnchorMs;
+    /* Render-buffer pacing: hand NDL a future PTS so its renderer owns the vsync. */
+    int renderQueueTarget;
+    double renderFrameMs;
+    bool renderAnchored;
+    int64_t renderHostAnchorUs;
+    double renderAnchorMs;
+    double renderLastPts;
+    double renderTrimMs;
+    uint64_t renderFrames;
+    uint64_t renderQueueSum;
+    uint64_t renderStarved;
+    uint64_t renderResyncs;
+    int renderQueueMax;
     pthread_cond_t presentCond;
     bool presentSeen;
     bool presentGateEnabled;
@@ -63,6 +76,19 @@ uint64_t SS4S_NDL_webOS5_GetPts(const SS4S_PlayerContext *context);
 
 /** Wall-clock / host-mapped PTS, optionally smoothed on a virtual grid. */
 uint64_t SS4S_NDL_webOS5_NextVideoPts(SS4S_PlayerContext *context, int64_t hostPtsUs);
+
+/** True when render-buffer pacing is configured for this session. */
+bool SS4S_NDL_webOS5_RenderPacingEnabled(const SS4S_PlayerContext *context);
+
+/**
+ * PTS (ms) placed far enough ahead that NDL's renderer queues the frame instead of
+ * showing it on arrival. `queueLen` is the render buffer depth read just before the
+ * call, or negative when unknown.
+ */
+uint64_t SS4S_NDL_webOS5_RenderPacedPts(SS4S_PlayerContext *context, int64_t hostPtsUs, int queueLen);
+
+/** Log render-buffer pacing health (mean queue depth, starvation, resyncs). */
+void SS4S_NDL_webOS5_LogRenderPacing(const SS4S_PlayerContext *context);
 
 /** Wait for STARFISH RENDERED_FRAME. Caller holds SS4S_NDL_webOS5_Lock. */
 bool SS4S_NDL_webOS5_WaitPresent(SS4S_PlayerContext *context);
