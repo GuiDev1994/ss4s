@@ -92,6 +92,8 @@ static void ResetRenderPacing(SS4S_PlayerContext *context) {
     context->renderStarved = 0;
     context->renderResyncs = 0;
     context->renderQueueMax = 0;
+    context->renderStarveRun = 0;
+    context->renderPtsIgnored = false;
 }
 
 bool SS4S_NDL_webOS5_RenderPacingEnabled(const SS4S_PlayerContext *context) {
@@ -116,6 +118,26 @@ void SS4S_NDL_webOS5_LogRenderPacing(const SS4S_PlayerContext *context) {
 uint64_t SS4S_NDL_webOS5_RenderPacedPts(SS4S_PlayerContext *context, int64_t hostPtsUs, int queueLen) {
     const double wall = (double) SS4S_NDL_webOS5_GetPts(context);
     const double lead = context->renderQueueTarget * context->renderFrameMs;
+    if (context->renderPtsIgnored) {
+        return (uint64_t) (wall + 0.5);
+    }
+    /* Buffer already holding frames: a future PTS only adds delay (4K backlog). */
+    if (queueLen >= 2) {
+        return (uint64_t) (wall + 0.5);
+    }
+    if (queueLen == 0) {
+        context->renderStarveRun++;
+        if (context->renderFrames >= 90 && context->renderStarveRun >= 90) {
+            context->renderPtsIgnored = true;
+            SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
+                                "Render buffer stayed empty for %u frames; NDL is ignoring future PTS. "
+                                "V-Sync lead disabled (PTS = now)",
+                                context->renderStarveRun);
+            return (uint64_t) (wall + 0.5);
+        }
+    } else {
+        context->renderStarveRun = 0;
+    }
     if (hostPtsUs < 0) {
         /* No host clock: the best we can do is a constant offset from arrival. */
         return (uint64_t) (wall + lead + 0.5);
@@ -549,6 +571,18 @@ static int LoadMedia(SS4S_PlayerContext *context) {
     }
 
     context->mediaLoaded = true;
+    /* 4K HEVC at 120 fps can fill NDL's decode queue faster than the panel
+     * drains it (native 3840x2160 vs scaled 3.6K). Drop late frames instead
+     * of letting latency grow without bound. No-op if the API is missing.
+     * HEVC/H.264: only this 4K gate — do not change.
+     * AV1: skip even at 4K. The same threshold at 120 Hz drops ~every other
+     * frame (looks like 60 fps) because AV1 Play() is slower than HEVC. */
+    if (context->mediaInfo.video.width >= 3840 &&
+        context->mediaInfo.video.type != NDL_VIDEO_TYPE_AV1) {
+        int drop_rc = NDL_DirectVideoSetFrameDropThreshold(1);
+        SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
+                            "4K: NDL_DirectVideoSetFrameDropThreshold(1) rc=%d", drop_rc);
+    }
     AuroraFrameDiagBeginSession("ndl");
     clock_gettime(CLOCK_MONOTONIC, &context->mediaLoadedTime);
     context->smoothPtsInitialized = false;

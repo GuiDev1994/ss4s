@@ -324,9 +324,10 @@ static bool SmoothPacingEnvEnabled(void) {
 
 static bool PauseAtDecodeTimeEnvEnabled(void) {
     const char *env = getenv("SS4S_PAUSE_AT_DECODE_TIME");
-    /* Default ON (historical Starfish Load behavior) unless explicitly disabled. */
+    /* Default OFF. Holding frames until PTS at 120 Hz on a ms clock
+     * skips ~2–5 frames/s (decoded 115–118). Aurora sets the env to 0. */
     if (env == NULL || env[0] == '\0') {
-        return true;
+        return false;
     }
     if (env[0] == '0' || strcmp(env, "false") == 0 || strcmp(env, "off") == 0 ||
         strcmp(env, "FALSE") == 0 || strcmp(env, "OFF") == 0) {

@@ -57,6 +57,8 @@ struct SS4S_PlayerContext {
     uint64_t renderStarved;
     uint64_t renderResyncs;
     int renderQueueMax;
+    unsigned renderStarveRun;
+    bool renderPtsIgnored;
     pthread_cond_t presentCond;
     bool presentSeen;
     bool presentGateEnabled;

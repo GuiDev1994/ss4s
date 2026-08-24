@@ -8,6 +8,34 @@ static SS4S_VideoOpenResult ReloadWithSize(SS4S_PlayerContext *context, int widt
 
 static uint64_t GetTimeUs();
 
+/*
+ * AV1-only PTS. Same Series S 120-looks-like-60 failure: the sink vsync-schedules
+ * on timestamps. HEVC on C5 ignores PTS (arrival = present). A synthetic 8 ms
+ * *future* grid tells AV1 to wait for the next 60 Hz tick and drop every other
+ * frame. Analog of DXGI ALLOW_TEARING: already-due, unique millisecond PTS so
+ * Play() presents immediately. HEVC NextVideoPts is untouched.
+ */
+static uint64_t av1_last_pts_ms;
+static bool av1_pts_inited;
+
+static void Av1PtsReset(int fpsNum, int fpsDen) {
+    (void) fpsNum;
+    (void) fpsDen;
+    av1_last_pts_ms = 0;
+    av1_pts_inited = false;
+}
+
+static uint64_t Av1NextPtsMs(SS4S_PlayerContext *context) {
+    uint64_t wall = SS4S_NDL_webOS5_GetPts(context);
+    uint64_t pts = wall;
+    if (av1_pts_inited && pts <= av1_last_pts_ms) {
+        pts = av1_last_pts_ms + 1;
+    }
+    av1_pts_inited = true;
+    av1_last_pts_ms = pts;
+    return pts;
+}
+
 static bool GetCapabilities(SS4S_VideoCapabilities *capabilities) {
     capabilities->codecs = SS4S_VIDEO_H264 | SS4S_VIDEO_H265 | SS4S_VIDEO_VP9 | SS4S_VIDEO_AV1;
     capabilities->transform = SS4S_VIDEO_CAP_TRANSFORM_UI_COMPOSITING;
@@ -68,6 +96,11 @@ static SS4S_VideoOpenResult OpenVideo(const SS4S_VideoInfo *info, const SS4S_Vid
 
     finish:
     pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
+    if (result == SS4S_VIDEO_OPEN_OK && info->codec == SS4S_VIDEO_AV1) {
+        Av1PtsReset(info->frameRateNumerator, info->frameRateDenominator);
+        SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
+                            "AV1 PTS immediate unique-ms (HEVC feed/PTS unchanged)");
+    }
     SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "OpenVideo returned %d", result);
     return result;
 }
@@ -78,6 +111,29 @@ static SS4S_VideoFeedResult FeedVideoWithPTS(SS4S_VideoInstance *instance, const
     SS4S_PlayerContext *context = (void *) instance;
     if (!context->mediaLoaded) {
         return SS4S_VIDEO_FEED_NOT_READY;
+    }
+    if (context->mediaInfo.video.type == NDL_VIDEO_TYPE_AV1) {
+        pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
+        uint64_t pts = Av1NextPtsMs(context);
+        pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
+        int av1_rc = NDL_DirectVideoPlay((void *) data, size, (long long) pts);
+        if (av1_rc != 0) {
+            SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL", "AV1 NDL_DirectVideoPlay returned %d: %s",
+                                av1_rc, NDL_DirectMediaGetError());
+            return SS4S_VIDEO_FEED_ERROR;
+        }
+        /* Same overlay D as HEVC (queue × interval). Do not report Play() duration:
+         * that is submit time (~0.2 ms), not decode, and made AV1 look "faster". */
+        uint64_t now = GetTimeUs();
+        int renderBufferLength = 0;
+        if (context->lastFrameTime > 0 &&
+            NDL_DirectVideoGetRenderBufferLength(&renderBufferLength) == 0) {
+            float bufLen = renderBufferLength > 0 ? (float) renderBufferLength : 0.5f;
+            float latency = bufLen * (float) (now - context->lastFrameTime);
+            SS4S_NDL_webOS5_Lib->VideoStats.ReportFrame(context->player, (int) latency);
+        }
+        context->lastFrameTime = now;
+        return SS4S_VIDEO_FEED_OK;
     }
     pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
     /* Never block the decode thread on RENDERED_FRAME — a late compositor
@@ -187,6 +243,7 @@ static bool SetHDRInfo(SS4S_VideoInstance *instance, const SS4S_VideoHDRInfo *in
 
 static void CloseVideo(SS4S_VideoInstance *instance) {
     SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "CloseVideo called");
+    Av1PtsReset(0, 0);
     pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
     SS4S_PlayerContext *context = (void *) instance;
     context->mediaInfo.video.type = 0;

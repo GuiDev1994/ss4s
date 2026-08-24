@@ -3,25 +3,25 @@
 #include <stdint.h>
 
 /**
- * Moonlight / Opus decoder PCM (SDL / Vorbis):
- *   0 FL(E), 1 FR(D), 2 C, 3 LFE(S), 4 RL(PE), 5 RR(PD)
+ * NDL 6-channel PCM on this C5 + eARC bar, after WAVE decode
+ * (FL FR C LFE RL RR) and host surroundParams=642014523:
  *
- * Device order (LG soundbar / Starfish 6ch), LFE last — validated on-device:
- *   0 E, 1 PD, 2 D, 3 PE, 4 C, 5 S
+ *   0 E  (FL), 1 PD (RR), 2 D (FR), 3 PE (RL), 4 C, 5 Sub (LFE)
  *
- * Unity gain on all channels (PE ×2.5 reduced quality without a usable level fix).
- *
- * Do NOT also send host surroundParams "642014523".
+ * Unity gain on every slot. PE is the correct speaker but quieter than PD;
+ * digital boost (×2.5 wrap or +3 dB saturate) distorted on this eARC bar.
+ * Do not send a second Sunshine surround-params on top.
  */
 static inline void SS4S_WebOS_RemapPcm51ToDevice(const int16_t *in, int16_t *out, int frames) {
     for (int f = 0; f < frames; f++) {
         const int16_t *s = in + f * 6;
         int16_t *d = out + f * 6;
-        d[0] = s[0]; /* E  (FL) */
-        d[1] = s[5]; /* PD (RR) */
-        d[2] = s[1]; /* D  (FR) */
-        d[3] = s[4]; /* PE (RL) */
-        d[4] = s[2]; /* C  (FC) */
-        d[5] = s[3]; /* S  (LFE) */
+        const int16_t fl = s[0], fr = s[1], c = s[2], lfe = s[3], rl = s[4], rr = s[5];
+        d[0] = fl;  /* E   */
+        d[1] = rr;  /* PD  */
+        d[2] = fr;  /* D   */
+        d[3] = rl;  /* PE  */
+        d[4] = c;   /* C   */
+        d[5] = lfe; /* Sub */
     }
 }

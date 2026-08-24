@@ -43,9 +43,10 @@ static bool GetCapabilities(SS4S_AudioCapabilities *capabilities, SS4S_AudioCode
 
 static SS4S_AudioCodec GetPreferredCodecs(const SS4S_AudioInfo *info) {
     /*
-     * Prefer Opus for 5.1 (pre-1.1.11 / issue #63). PCM 6ch on NDL can mis-map
-     * channels on Apollo; stereo still prefers PCM. PCM Feed remaps if Open
-     * falls back to PCM.
+     * Opus 5.1 is still preferred when the user did not force PCM: NDL's Opus
+     * decoder owns speaker mapping. eARC Atmos + stub OpusHead can clip; that
+     * path is avoided by Experimental → Decode 5.1 in the client (PCM), which
+     * remaps WAVE to webOS 6-channel (FL FR RL RR C LFE). Stereo stays PCM.
      */
     if (info->numOfChannels == 6) {
         return SS4S_AUDIO_OPUS;
@@ -145,10 +146,10 @@ static SS4S_AudioFeedResult FeedAudio(SS4S_AudioInstance *instance, const unsign
     if (!context->mediaLoaded) {
         return SS4S_AUDIO_FEED_NOT_READY;
     }
-    /* Transcode and remap before taking the lock: holding it across an Opus
-     * re-encode blocks the video feed for the whole encode. Close only runs
-     * after Limelight joins the audio threads, so the instances stay valid. */
-    int16_t *remap_owned = NULL;
+    /* Transcode / remap before taking the lock. 6ch WAVE (FL FR C LFE RL RR)
+     * becomes webOS 6-channel (FL FR RL RR C LFE) so Sub is last. Stack buffer
+     * — no malloc on the audio thread. */
+    int16_t remap_stack[240 * 6];
     if (context->opusFix) {
         int fixedSize = SS4S_NDLOpusFixProcess(context->opusFix, data, size);
         if (fixedSize < 0) {
@@ -162,21 +163,18 @@ static SS4S_AudioFeedResult FeedAudio(SS4S_AudioInstance *instance, const unsign
                strncmp(context->mediaInfo.audio.pcm.channelMode, "6-channel", 10) == 0 &&
                size >= 6 * sizeof(int16_t) && (size % (6 * sizeof(int16_t))) == 0) {
         int frames = (int) (size / (6 * sizeof(int16_t)));
-        remap_owned = malloc(size);
-        if (remap_owned != NULL) {
-            SS4S_WebOS_RemapPcm51ToDevice((const int16_t *) data, remap_owned, frames);
-            data = (const unsigned char *) remap_owned;
+        if ((size_t) frames * 6 <= sizeof(remap_stack) / sizeof(remap_stack[0])) {
+            SS4S_WebOS_RemapPcm51ToDevice((const int16_t *) data, remap_stack, frames);
+            data = (const unsigned char *) remap_stack;
         }
     }
     pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
     if (!context->mediaLoaded) {
         pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
-        free(remap_owned);
         return SS4S_AUDIO_FEED_NOT_READY;
     }
     uint64_t pts = SS4S_NDL_webOS5_GetPts(context);
     int rc = NDL_DirectAudioPlay((void *) data, size, (long long) pts);
-    free(remap_owned);
     if (rc != 0) {
         SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL", "NDL_DirectAudioPlay returned %d: %s", rc,
                             NDL_DirectMediaGetError());
