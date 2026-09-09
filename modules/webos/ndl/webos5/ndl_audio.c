@@ -7,7 +7,6 @@
 #include "ndl_common.h"
 #include "opus_empty.h"
 #include "opus_fix.h"
-#include "../../common/webos_pcm_51_remap.h"
 
 static bool IsOpusPassthroughSupported(const OpusConfig *config);
 
@@ -42,12 +41,6 @@ static bool GetCapabilities(SS4S_AudioCapabilities *capabilities, SS4S_AudioCode
 }
 
 static SS4S_AudioCodec GetPreferredCodecs(const SS4S_AudioInfo *info) {
-    /*
-     * Opus 5.1 is still preferred when the user did not force PCM: NDL's Opus
-     * decoder owns speaker mapping. eARC Atmos + stub OpusHead can clip; that
-     * path is avoided by Experimental → Decode 5.1 in the client (PCM), which
-     * remaps WAVE to webOS 6-channel (FL FR RL RR C LFE). Stereo stays PCM.
-     */
     if (info->numOfChannels == 6) {
         return SS4S_AUDIO_OPUS;
     }
@@ -146,10 +139,6 @@ static SS4S_AudioFeedResult FeedAudio(SS4S_AudioInstance *instance, const unsign
     if (!context->mediaLoaded) {
         return SS4S_AUDIO_FEED_NOT_READY;
     }
-    /* Transcode / remap before taking the lock. 6ch WAVE (FL FR C LFE RL RR)
-     * becomes webOS 6-channel (FL FR RL RR C LFE) so Sub is last. Stack buffer
-     * — no malloc on the audio thread. */
-    int16_t remap_stack[240 * 6];
     if (context->opusFix) {
         int fixedSize = SS4S_NDLOpusFixProcess(context->opusFix, data, size);
         if (fixedSize < 0) {
@@ -158,15 +147,6 @@ static SS4S_AudioFeedResult FeedAudio(SS4S_AudioInstance *instance, const unsign
         }
         data = SS4S_NDLOpusFixGetBuffer(context->opusFix);
         size = fixedSize;
-    } else if (context->mediaInfo.audio.pcm.type == NDL_AUDIO_TYPE_PCM &&
-               context->mediaInfo.audio.pcm.channelMode != NULL &&
-               strncmp(context->mediaInfo.audio.pcm.channelMode, "6-channel", 10) == 0 &&
-               size >= 6 * sizeof(int16_t) && (size % (6 * sizeof(int16_t))) == 0) {
-        int frames = (int) (size / (6 * sizeof(int16_t)));
-        if ((size_t) frames * 6 <= sizeof(remap_stack) / sizeof(remap_stack[0])) {
-            SS4S_WebOS_RemapPcm51ToDevice((const int16_t *) data, remap_stack, frames);
-            data = (const unsigned char *) remap_stack;
-        }
     }
     pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
     if (!context->mediaLoaded) {
