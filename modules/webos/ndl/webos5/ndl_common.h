@@ -22,6 +22,14 @@ struct SS4S_PlayerContext {
     struct SS4S_NDLOpusFix *opusFix;
     bool mediaLoaded;
     struct timespec mediaLoadedTime;
+    /* NDL v2 load gate (pf-webOS PR #249): LOADCOMPLETED / feed-anyway. */
+    _Atomic bool loadCompleted;
+    _Atomic bool feedUnblocked;
+    _Atomic bool primeStop;
+    bool primeThreadRunning;
+    pthread_t primeThread;
+    int64_t lastAudioPtsMs;
+    bool firstVideoFeedLogged;
     bool waitAudioVideoReady;
     _Atomic bool panelPhaseLoosen;
     int aspectRatio;
@@ -96,6 +104,9 @@ void SS4S_NDL_webOS5_LogRenderPacing(const SS4S_PlayerContext *context);
 bool SS4S_NDL_webOS5_WaitPresent(SS4S_PlayerContext *context);
 
 void SS4S_NDL_webOS5_ConfigureSmoothPacing(SS4S_PlayerContext *context, int fpsNum, int fpsDen);
+
+/** False until LOADCOMPLETED or feed-anyway; video Feed should return NOT_READY. */
+bool SS4S_NDL_webOS5_EnsureVideoFeedReady(SS4S_PlayerContext *context);
 
 int SS4S_NDL_webOS5_Driver_PostInit(int argc, char *argv[]);
 

@@ -37,6 +37,8 @@ ss4s_add_test(feed_guard SOURCES test_feed_guard.c)
 
 ss4s_add_test(video_concurrent_lifecycle_dummy SOURCES test_video_concurrent_lifecycle.c ARGS dummy)
 
+ss4s_add_test(ndl_delayed_load_prime_ndl-webos5 SOURCES test_ndl_delayed_load_prime.c ARGS ndl-webos5)
+
 ss4s_add_test(pcm_playback_sdl SOURCES test_pcm_playback.c ARGS sdl)
 ss4s_add_test(pcm_playback_alsa SOURCES test_pcm_playback.c ARGS alsa)
 ss4s_add_test(pcm_playback_pulse SOURCES test_pcm_playback.c ARGS pulse)

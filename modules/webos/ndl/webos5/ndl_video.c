@@ -112,6 +112,9 @@ static SS4S_VideoFeedResult FeedVideoWithPTS(SS4S_VideoInstance *instance, const
     if (!context->mediaLoaded) {
         return SS4S_VIDEO_FEED_NOT_READY;
     }
+    if (!SS4S_NDL_webOS5_EnsureVideoFeedReady(context)) {
+        return SS4S_VIDEO_FEED_NOT_READY;
+    }
     if (context->mediaInfo.video.type == NDL_VIDEO_TYPE_AV1) {
         pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
         uint64_t pts = Av1NextPtsMs(context);
@@ -121,6 +124,10 @@ static SS4S_VideoFeedResult FeedVideoWithPTS(SS4S_VideoInstance *instance, const
             SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL", "AV1 NDL_DirectVideoPlay returned %d: %s",
                                 av1_rc, NDL_DirectMediaGetError());
             return SS4S_VIDEO_FEED_ERROR;
+        }
+        if (!context->firstVideoFeedLogged) {
+            context->firstVideoFeedLogged = true;
+            SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "First video feed accepted (AV1)");
         }
         /* Same overlay D as HEVC (queue × interval). Do not report Play() duration:
          * that is submit time (~0.2 ms), not decode, and made AV1 look "faster". */
@@ -163,6 +170,10 @@ static SS4S_VideoFeedResult FeedVideoWithPTS(SS4S_VideoInstance *instance, const
         SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL", "NDL_DirectVideoPlay returned %d: %s", rc,
                             NDL_DirectMediaGetError());
         return SS4S_VIDEO_FEED_ERROR;
+    }
+    if (!context->firstVideoFeedLogged) {
+        context->firstVideoFeedLogged = true;
+        SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "First video feed accepted");
     }
     uint64_t now = GetTimeUs();
     int renderBufferLength = 0;

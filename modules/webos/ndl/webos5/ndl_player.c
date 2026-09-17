@@ -6,9 +6,17 @@
 #include <stdio.h>
 #include <errno.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "opus_empty.h"
 #include "../../common/aurora_frame_diag.h"
+
+/* pf-webOS NDL v2 load prime (client-webos f93738278 / PR #249). */
+#define NDL_AUDIO_PRIME_BUDGET_MS 500
+#define NDL_PRIME_PACKET_MS 5
+#define NDL_PRIME_LEAD_PACKETS 8
+#define NDL_PRIME_RETRY_MS 20
+#define NDL_FEED_ANYWAY_AFTER_MS 300
 
 static SS4S_PlayerContext *CreatePlayerContext(SS4S_Player *player);
 
@@ -19,6 +27,20 @@ static void PlayerSetWaitAudioVideoReady(SS4S_PlayerContext *context, bool optio
 static void PlayerSetPanelPhaseLoosen(SS4S_PlayerContext *context, bool loosen);
 
 static int OpusFeedEmpty(void *arg, const unsigned char *data, size_t size);
+
+static void StopPrimeThread(SS4S_PlayerContext *context);
+
+static int FeedOnePrimePacket(SS4S_PlayerContext *context, int64_t pts_ms);
+
+static void FeedPrimeBurst(SS4S_PlayerContext *context);
+
+static void PrimeAudioUntil(SS4S_PlayerContext *context, int budget_ms);
+
+static void *PrimeContinuationThread(void *arg);
+
+static void StartPrimeContinuation(SS4S_PlayerContext *context);
+
+bool SS4S_NDL_webOS5_EnsureVideoFeedReady(SS4S_PlayerContext *context);
 
 const SS4S_PlayerDriver SS4S_NDL_webOS5_PlayerDriver = {
     .Create = CreatePlayerContext,
@@ -277,6 +299,160 @@ int SS4S_NDL_webOS5_UnloadMedia(SS4S_PlayerContext *context) {
     return UnloadMedia(context);
 }
 
+static int64_t NdlElapsedMs(const SS4S_PlayerContext *context) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (int64_t) ((now.tv_sec - context->mediaLoadedTime.tv_sec) * 1000 +
+                      (now.tv_nsec - context->mediaLoadedTime.tv_nsec) / 1000000);
+}
+
+static void StopPrimeThread(SS4S_PlayerContext *context) {
+    if (!context->primeThreadRunning) {
+        return;
+    }
+    atomic_store(&context->primeStop, true);
+    /* Drop the driver lock while joining so the prime thread can finish a burst. */
+    pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
+    pthread_join(context->primeThread, NULL);
+    pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
+    context->primeThreadRunning = false;
+    atomic_store(&context->primeStop, false);
+}
+
+static int FeedOnePrimePacket(SS4S_PlayerContext *context, int64_t pts_ms) {
+    if (context->mediaInfo.audio.type == NDL_AUDIO_TYPE_PCM) {
+        unsigned short empty_buf[8] = {0};
+        int numChannels = 2;
+        if (strncmp(context->mediaInfo.audio.pcm.channelMode, "mono", 4) == 0) {
+            numChannels = 1;
+        } else if (strncmp(context->mediaInfo.audio.pcm.channelMode, "6-channel", 10) == 0) {
+            numChannels = 6;
+        }
+        size_t size = (size_t) numChannels * sizeof(unsigned short);
+        return NDL_DirectAudioPlay(empty_buf, size, pts_ms);
+    }
+    if (context->opusEmpty != NULL) {
+        context->lastAudioPtsMs = pts_ms;
+        return SS4S_OpusEmptyFeed(context->opusEmpty, OpusFeedEmpty, context);
+    }
+    /* Audio arm present but no empty-frame helper yet (Opus without codec data). */
+    unsigned char silence[3] = {0xec, 0xff, 0xfe};
+    return NDL_DirectAudioPlay(silence, sizeof(silence), pts_ms);
+}
+
+static void FeedPrimeBurst(SS4S_PlayerContext *context) {
+    if (context->mediaInfo.audio.type == 0) {
+        return;
+    }
+    int64_t now_ms = NdlElapsedMs(context);
+    if (now_ms < 0) {
+        now_ms = 0;
+    }
+    int64_t target_ms = now_ms + NDL_PRIME_LEAD_PACKETS * NDL_PRIME_PACKET_MS;
+    int64_t pts_ms = context->lastAudioPtsMs;
+    while (pts_ms < target_ms) {
+        pts_ms += NDL_PRIME_PACKET_MS;
+        if (FeedOnePrimePacket(context, pts_ms) != 0) {
+            SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL",
+                                "Audio prime rejected at %lld ms: %s",
+                                (long long) pts_ms, NDL_DirectMediaGetError());
+            break;
+        }
+        context->lastAudioPtsMs = pts_ms;
+    }
+}
+
+static void PrimeAudioUntil(SS4S_PlayerContext *context, int budget_ms) {
+    if (context->mediaInfo.audio.type == 0) {
+        return;
+    }
+    SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
+                        "Audio prime start budget=%dms", budget_ms);
+    while (!atomic_load(&context->loadCompleted)) {
+        if (NdlElapsedMs(context) >= budget_ms) {
+            SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
+                                "Audio prime: no LOADCOMPLETED within %dms (%lld ms silence) — "
+                                "continuing prime until callback",
+                                budget_ms, (long long) context->lastAudioPtsMs);
+            return;
+        }
+        FeedPrimeBurst(context);
+        pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
+        usleep(NDL_PRIME_RETRY_MS * 1000);
+        pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
+        if (!context->mediaLoaded) {
+            return;
+        }
+    }
+    SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
+                        "Audio prime: LOADCOMPLETED after %lld ms (%lld ms silence)",
+                        (long long) NdlElapsedMs(context), (long long) context->lastAudioPtsMs);
+}
+
+static void *PrimeContinuationThread(void *arg) {
+    SS4S_PlayerContext *context = arg;
+    SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
+                        "NDL clock plane: carrying prime until LOADCOMPLETED");
+    while (!atomic_load(&context->primeStop) && !atomic_load(&context->loadCompleted)) {
+        pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
+        if (context->mediaLoaded && context->mediaInfo.audio.type != 0) {
+            FeedPrimeBurst(context);
+        }
+        pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
+        usleep(NDL_PRIME_RETRY_MS * 1000);
+    }
+    if (atomic_load(&context->loadCompleted)) {
+        SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
+                            "NDL clock plane: load confirmed, leaving the plane on its prime");
+    }
+    return NULL;
+}
+
+static void StartPrimeContinuation(SS4S_PlayerContext *context) {
+    if (context->primeThreadRunning || context->mediaInfo.audio.type == 0) {
+        return;
+    }
+    atomic_store(&context->primeStop, false);
+    if (pthread_create(&context->primeThread, NULL, PrimeContinuationThread, context) != 0) {
+        SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL", "Failed to start prime continuation thread");
+        return;
+    }
+    context->primeThreadRunning = true;
+}
+
+bool SS4S_NDL_webOS5_EnsureVideoFeedReady(SS4S_PlayerContext *context) {
+    if (!context->mediaLoaded) {
+        return false;
+    }
+    if (atomic_load(&context->feedUnblocked)) {
+        if (context->primeThreadRunning) {
+            pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
+            StopPrimeThread(context);
+            pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
+        }
+        return true;
+    }
+    if (atomic_load(&context->loadCompleted)) {
+        atomic_store(&context->feedUnblocked, true);
+        SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
+                            "LOADCOMPLETED landed %lld ms after load — video feed unblocked",
+                            (long long) NdlElapsedMs(context));
+        pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
+        StopPrimeThread(context);
+        pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
+        return true;
+    }
+    if (NdlElapsedMs(context) >= NDL_FEED_ANYWAY_AFTER_MS) {
+        atomic_store(&context->feedUnblocked, true);
+        SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL",
+                            "Still no LOADCOMPLETED %lld ms after load — feeding video anyway",
+                            (long long) NdlElapsedMs(context));
+        /* Keep priming until LOADCOMPLETED — do not stop the continuation here. */
+        return true;
+    }
+    return false;
+}
+
 uint64_t SS4S_NDL_webOS5_GetPts(const SS4S_PlayerContext *context) {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
@@ -488,6 +664,9 @@ static SS4S_PlayerContext *CreatePlayerContext(SS4S_Player *player) {
     SS4S_PlayerContext *created = calloc(1, sizeof(SS4S_PlayerContext));
     created->player = player;
     atomic_init(&created->panelPhaseLoosen, false);
+    atomic_init(&created->loadCompleted, false);
+    atomic_init(&created->feedUnblocked, false);
+    atomic_init(&created->primeStop, false);
     if (!NdlPresentGateInit(created)) {
         SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL", "present-gate cond init failed");
     }
@@ -517,6 +696,11 @@ static void PlayerSetPanelPhaseLoosen(SS4S_PlayerContext *context, bool loosen) 
 
 static int UnloadMedia(SS4S_PlayerContext *context) {
     int ret = 0;
+    StopPrimeThread(context);
+    atomic_store(&context->loadCompleted, false);
+    atomic_store(&context->feedUnblocked, false);
+    context->firstVideoFeedLogged = false;
+    context->lastAudioPtsMs = 0;
     if (context->mediaLoaded) {
         SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "Unloading media");
         SS4S_NDL_webOS5_LogRenderPacing(context);
@@ -551,26 +735,31 @@ static int LoadMedia(SS4S_PlayerContext *context) {
     }
     SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "NDL_DirectMediaLoad(video=%u (%d*%d), atype=%u)", info.video.type,
                         info.video.width, info.video.height, info.audio.type);
+    atomic_store(&context->loadCompleted, false);
+    atomic_store(&context->feedUnblocked, false);
+    context->firstVideoFeedLogged = false;
+    context->lastAudioPtsMs = 0;
+    /* PTS domain origin is the load CALL, matching pf-webOS load_instant. */
+    clock_gettime(CLOCK_MONOTONIC, &context->mediaLoadedTime);
     if ((ret = NDL_DirectMediaLoad(&info, LoadCallback)) != 0) {
         SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL", "NDL_DirectMediaLoad returned %d: %s", ret,
                             NDL_DirectMediaGetError());
         return ret;
     }
-    if (context->mediaInfo.audio.type == NDL_AUDIO_TYPE_PCM) {
-        unsigned short empty_buf[8] = {0};
-        int numChannels = 2;
-        if (strncmp(context->mediaInfo.audio.pcm.channelMode, "mono", 4) == 0) {
-            numChannels = 1;
-        } else if (strncmp(context->mediaInfo.audio.pcm.channelMode, "6-channel", 10) == 0) {
-            numChannels = 6;
+    SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "NDL_DirectMediaLoad accepted (awaiting LOADCOMPLETED)");
+    context->mediaLoaded = true;
+
+    if (context->mediaInfo.audio.type != 0) {
+        PrimeAudioUntil(context, NDL_AUDIO_PRIME_BUDGET_MS);
+        if (!atomic_load(&context->loadCompleted) && context->mediaLoaded) {
+            StartPrimeContinuation(context);
         }
-        size_t size = numChannels * sizeof(unsigned short);
-        NDL_DirectAudioPlay(empty_buf, size, (long long) SS4S_NDL_webOS5_GetPts(context));
-    } else if (context->opusEmpty != NULL) {
-        SS4S_OpusEmptyFeed(context->opusEmpty, OpusFeedEmpty, context);
+    } else {
+        /* Video-only: unblock once feed-anyway elapses; LOADCOMPLETED still preferred. */
+        SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL",
+                            "Video-only load — picture will not be paced against an audio plane");
     }
 
-    context->mediaLoaded = true;
     /* 4K HEVC at 120 fps can fill NDL's decode queue faster than the panel
      * drains it (native 3840x2160 vs scaled 3.6K). Drop late frames instead
      * of letting latency grow without bound. No-op if the API is missing.
@@ -584,7 +773,6 @@ static int LoadMedia(SS4S_PlayerContext *context) {
                             "4K: NDL_DirectVideoSetFrameDropThreshold(1) rc=%d", drop_rc);
     }
     AuroraFrameDiagBeginSession("ndl");
-    clock_gettime(CLOCK_MONOTONIC, &context->mediaLoadedTime);
     context->smoothPtsInitialized = false;
     context->smoothLastPts = 0;
     context->hostPtsAnchored = false;
@@ -601,6 +789,11 @@ static void LoadCallback(int type, long long numValue, const char *strValue) {
     switch (type) {
         case 0x16: {
             SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "%s STATE_UPDATE_LOADCOMPLETED: %s", __FUNCTION__, strValue);
+            if (ActivatePlayerContext != NULL) {
+                atomic_store(&ActivatePlayerContext->loadCompleted, true);
+                atomic_store(&ActivatePlayerContext->feedUnblocked, true);
+                atomic_store(&ActivatePlayerContext->primeStop, true);
+            }
             break;
         }
         case 0x17: {
@@ -630,5 +823,13 @@ static void LoadCallback(int type, long long numValue, const char *strValue) {
 }
 
 static int OpusFeedEmpty(void *arg, const unsigned char *data, size_t size) {
-    return NDL_DirectAudioPlay((void *) data, size, (long long) SS4S_NDL_webOS5_GetPts(arg));
+    SS4S_PlayerContext *context = arg;
+    int64_t pts = context->lastAudioPtsMs;
+    if (pts <= 0) {
+        pts = NdlElapsedMs(context);
+        if (pts < 0) {
+            pts = 0;
+        }
+    }
+    return NDL_DirectAudioPlay((void *) data, size, pts);
 }
