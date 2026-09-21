@@ -28,9 +28,16 @@ configure_file(../samples/av-threaded/sample.h264 ${CMAKE_CURRENT_BINARY_DIR} CO
 
 ss4s_add_test(initialization SOURCES test_initialization.c)
 
+ss4s_add_test(player_panel_phase SOURCES test_player_panel_phase.c)
+
+add_executable(ss4s_test_panel_phase_pts test_panel_phase_pts.c)
+add_test(NAME panel_phase_pts COMMAND ss4s_test_panel_phase_pts)
+
 ss4s_add_test(feed_guard SOURCES test_feed_guard.c)
 
 ss4s_add_test(video_concurrent_lifecycle_dummy SOURCES test_video_concurrent_lifecycle.c ARGS dummy)
+
+ss4s_add_test(ndl_delayed_load_prime_ndl-webos5 SOURCES test_ndl_delayed_load_prime.c ARGS ndl-webos5)
 
 ss4s_add_test(pcm_playback_sdl SOURCES test_pcm_playback.c ARGS sdl)
 ss4s_add_test(pcm_playback_alsa SOURCES test_pcm_playback.c ARGS alsa)

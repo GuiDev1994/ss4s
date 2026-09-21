@@ -5,6 +5,7 @@ extern "C" {
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 typedef struct SS4S_Player SS4S_Player;
 
@@ -116,6 +117,13 @@ SS4S_VideoOpenResult SS4S_PlayerVideoOpen(SS4S_Player *player, const SS4S_VideoI
 
 SS4S_VideoFeedResult SS4S_PlayerVideoFeed(SS4S_Player *player, const unsigned char *data, size_t size,
                                           SS4S_VideoFeedFlags flags);
+
+/**
+ * Feed a video frame with an optional host presentation timestamp (microseconds).
+ * Pass ptsUs < 0 when the host PTS is unavailable.
+ */
+SS4S_VideoFeedResult SS4S_PlayerVideoFeedWithPTS(SS4S_Player *player, const unsigned char *data, size_t size,
+                                                 SS4S_VideoFeedFlags flags, int64_t ptsUs);
 
 bool SS4S_PlayerVideoSizeChanged(SS4S_Player *player, int width, int height);
 

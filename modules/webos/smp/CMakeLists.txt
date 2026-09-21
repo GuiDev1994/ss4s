@@ -24,15 +24,16 @@ pkg_check_modules(SDL2 REQUIRED sdl2)
 
 add_subdirectory(wrapper)
 
-ss4s_add_module(smp-webos FOR_VIDEO IN_GROUP smp DISPLAY_NAME "webOS SMP" WEIGHT 10 OS_VERSION ">=5" SOURCES
+ss4s_add_module(smp-webos FOR_AUDIO FOR_VIDEO IN_GROUP smp DISPLAY_NAME "webOS SMP" WEIGHT 10 OS_VERSION ">=5" SOURCES
         src/smp_module.c
         src/smp_player.c
         src/smp_video.c
         src/smp_audio.c
         src/pbnjson_compat.c
         src/smp_resource_webos5.c
+        ../common/aurora_frame_diag.c
 )
-target_include_directories(${SS4S_MODULE_TARGET} PRIVATE src)
+target_include_directories(${SS4S_MODULE_TARGET} PRIVATE src ../common)
 target_include_directories(${SS4S_MODULE_TARGET} SYSTEM PRIVATE ${SDL2_INCLUDE_DIRS} ${GLIB_INCLUDE_DIRS}
         ${PBNJSON_C_INCLUDE_DIRS})
 target_link_libraries(${SS4S_MODULE_TARGET} PRIVATE playerAPIs_C dl ${SDL2_LIBRARIES} ${GLIB_LIBRARIES}
@@ -42,15 +43,16 @@ target_compile_definitions(${SS4S_MODULE_TARGET} PRIVATE USE_SDL_WEBOS _GNU_SOUR
 target_compile_definitions(${SS4S_MODULE_TARGET} PRIVATE "$<$<CONFIG:DEBUG>:DEBUG>")
 
 
-ss4s_add_module(smp-webos4 FOR_VIDEO IN_GROUP smp DISPLAY_NAME "webOS SMP" WEIGHT 10 OS_VERSION "=4" SOURCES
+ss4s_add_module(smp-webos4 FOR_AUDIO FOR_VIDEO IN_GROUP smp DISPLAY_NAME "webOS SMP" WEIGHT 10 OS_VERSION "=4" SOURCES
         src/smp_module.c
         src/smp_player.c
         src/smp_video.c
         src/smp_audio.c
         src/pbnjson_compat.c
         src/smp_resource_acb.c
+        ../common/aurora_frame_diag.c
 )
-target_include_directories(${SS4S_MODULE_TARGET} PRIVATE src)
+target_include_directories(${SS4S_MODULE_TARGET} PRIVATE src ../common)
 target_include_directories(${SS4S_MODULE_TARGET} SYSTEM PRIVATE ${GLIB_INCLUDE_DIRS} ${ACBAPI_INCLUDE_DIRS}
         ${PBNJSON_C_INCLUDE_DIRS})
 target_link_libraries(${SS4S_MODULE_TARGET} PRIVATE playerAPIs_C ss4s-webos-utils dl ${GLIB_LIBRARIES}
@@ -62,17 +64,18 @@ if (HAVE_SETMEDIAAUDIODATA)
 endif ()
 target_compile_definitions(${SS4S_MODULE_TARGET} PRIVATE "$<$<CONFIG:DEBUG>:DEBUG>")
 
-ss4s_add_module(smp-webos3 FOR_VIDEO IN_GROUP smp DISPLAY_NAME "webOS SMP" WEIGHT 10 OS_VERSION "<4" SOURCES
+ss4s_add_module(smp-webos3 FOR_AUDIO FOR_VIDEO IN_GROUP smp DISPLAY_NAME "webOS SMP" WEIGHT 10 OS_VERSION "<4" SOURCES
         src/smp_module.c
         src/smp_player.c
         src/smp_video.c
         src/smp_audio.c
         src/pbnjson_compat.c
         src/smp_resource_acb.c
+        ../common/aurora_frame_diag.c
 )
 target_include_directories(${SS4S_MODULE_TARGET} SYSTEM PRIVATE ${GLIB_INCLUDE_DIRS} ${ACBAPI_INCLUDE_DIRS}
         ${PBNJSON_C_INCLUDE_DIRS})
-target_include_directories(${SS4S_MODULE_TARGET} PRIVATE src)
+target_include_directories(${SS4S_MODULE_TARGET} PRIVATE src ../common)
 target_link_libraries(${SS4S_MODULE_TARGET} PRIVATE playerAPIs_C_Legacy ss4s-webos-utils dl ${GLIB_LIBRARIES}
         ${ACBAPI_LIBRARIES} ${PBNJSON_C_LIBRARIES})
 target_compile_definitions(${SS4S_MODULE_TARGET} PRIVATE USE_SDL_WEBOS _GNU_SOURCE SS4S_MODULE_NAME="smp-webos3"

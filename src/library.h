@@ -5,6 +5,8 @@
 #include "mutex.h"
 #include "feed_guard.h"
 
+#include <stdatomic.h>
+
 struct SS4S_Player {
     struct {
         SS4S_PlayerContext *audio;
@@ -14,6 +16,7 @@ struct SS4S_Player {
     SS4S_FeedGuard video_guard;
     void *userdata;
     int viewportWidth, viewportHeight;
+    _Atomic bool panelPhaseLoosen;
     SS4S_Mutex *mutex;
     struct {
         SS4S_StatsCounter video;

@@ -2,10 +2,39 @@
 #include "ndl_common.h"
 #include "highend_check.h"
 #include "max_res.h"
+#include "../../common/aurora_frame_diag.h"
 
 static SS4S_VideoOpenResult ReloadWithSize(SS4S_PlayerContext *context, int width, int height);
 
 static uint64_t GetTimeUs();
+
+/*
+ * AV1-only PTS. Same Series S 120-looks-like-60 failure: the sink vsync-schedules
+ * on timestamps. HEVC on C5 ignores PTS (arrival = present). A synthetic 8 ms
+ * *future* grid tells AV1 to wait for the next 60 Hz tick and drop every other
+ * frame. Analog of DXGI ALLOW_TEARING: already-due, unique millisecond PTS so
+ * Play() presents immediately. HEVC NextVideoPts is untouched.
+ */
+static uint64_t av1_last_pts_ms;
+static bool av1_pts_inited;
+
+static void Av1PtsReset(int fpsNum, int fpsDen) {
+    (void) fpsNum;
+    (void) fpsDen;
+    av1_last_pts_ms = 0;
+    av1_pts_inited = false;
+}
+
+static uint64_t Av1NextPtsMs(SS4S_PlayerContext *context) {
+    uint64_t wall = SS4S_NDL_webOS5_GetPts(context);
+    uint64_t pts = wall;
+    if (av1_pts_inited && pts <= av1_last_pts_ms) {
+        pts = av1_last_pts_ms + 1;
+    }
+    av1_pts_inited = true;
+    av1_last_pts_ms = pts;
+    return pts;
+}
 
 static bool GetCapabilities(SS4S_VideoCapabilities *capabilities) {
     capabilities->codecs = SS4S_VIDEO_H264 | SS4S_VIDEO_H265 | SS4S_VIDEO_VP9 | SS4S_VIDEO_AV1;
@@ -57,6 +86,7 @@ static SS4S_VideoOpenResult OpenVideo(const SS4S_VideoInfo *info, const SS4S_Vid
             goto finish;
     }
     context->mediaInfo.video.unknown1 = 0;
+    SS4S_NDL_webOS5_ConfigureSmoothPacing(context, info->frameRateNumerator, info->frameRateDenominator);
     result = ReloadWithSize(context, info->width, info->height);
     if (result != SS4S_VIDEO_OPEN_OK) {
         goto finish;
@@ -66,23 +96,84 @@ static SS4S_VideoOpenResult OpenVideo(const SS4S_VideoInfo *info, const SS4S_Vid
 
     finish:
     pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
+    if (result == SS4S_VIDEO_OPEN_OK && info->codec == SS4S_VIDEO_AV1) {
+        Av1PtsReset(info->frameRateNumerator, info->frameRateDenominator);
+        SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
+                            "AV1 PTS immediate unique-ms (HEVC feed/PTS unchanged)");
+    }
     SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "OpenVideo returned %d", result);
     return result;
 }
 
-static SS4S_VideoFeedResult FeedVideo(SS4S_VideoInstance *instance, const unsigned char *data, size_t size,
-                                      SS4S_VideoFeedFlags flags) {
+static SS4S_VideoFeedResult FeedVideoWithPTS(SS4S_VideoInstance *instance, const unsigned char *data, size_t size,
+                                             SS4S_VideoFeedFlags flags, int64_t ptsUs) {
     (void) flags;
     SS4S_PlayerContext *context = (void *) instance;
     if (!context->mediaLoaded) {
         return SS4S_VIDEO_FEED_NOT_READY;
     }
-    uint64_t pts = SS4S_NDL_webOS5_GetPts(context);
+    if (!SS4S_NDL_webOS5_EnsureVideoFeedReady(context)) {
+        return SS4S_VIDEO_FEED_NOT_READY;
+    }
+    if (context->mediaInfo.video.type == NDL_VIDEO_TYPE_AV1) {
+        pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
+        uint64_t pts = Av1NextPtsMs(context);
+        pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
+        int av1_rc = NDL_DirectVideoPlay((void *) data, size, (long long) pts);
+        if (av1_rc != 0) {
+            SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL", "AV1 NDL_DirectVideoPlay returned %d: %s",
+                                av1_rc, NDL_DirectMediaGetError());
+            return SS4S_VIDEO_FEED_ERROR;
+        }
+        if (!context->firstVideoFeedLogged) {
+            context->firstVideoFeedLogged = true;
+            SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "First video feed accepted (AV1)");
+        }
+        /* Same overlay D as HEVC (queue × interval). Do not report Play() duration:
+         * that is submit time (~0.2 ms), not decode, and made AV1 look "faster". */
+        uint64_t now = GetTimeUs();
+        int renderBufferLength = 0;
+        if (context->lastFrameTime > 0 &&
+            NDL_DirectVideoGetRenderBufferLength(&renderBufferLength) == 0) {
+            float bufLen = renderBufferLength > 0 ? (float) renderBufferLength : 0.5f;
+            float latency = bufLen * (float) (now - context->lastFrameTime);
+            SS4S_NDL_webOS5_Lib->VideoStats.ReportFrame(context->player, (int) latency);
+        }
+        context->lastFrameTime = now;
+        return SS4S_VIDEO_FEED_OK;
+    }
+    pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
+    /* Never block the decode thread on RENDERED_FRAME — a late compositor
+     * callback cascades into the next feed interval (visible pan hitch). */
+    const bool paced = SS4S_NDL_webOS5_RenderPacingEnabled(context);
+    const bool diag = AuroraFrameDiagEnabled();
+    int rq = -1;
+    if (paced || diag) {
+        int length = 0;
+        if (NDL_DirectVideoGetRenderBufferLength(&length) == 0) {
+            rq = length;
+        }
+    }
+    uint64_t pts = paced ? SS4S_NDL_webOS5_RenderPacedPts(context, ptsUs, rq)
+                         : SS4S_NDL_webOS5_NextVideoPts(context, ptsUs);
+    if (paced && context->renderFrames % 3600 == 0) {
+        SS4S_NDL_webOS5_LogRenderPacing(context);
+    }
+    pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
+    uint64_t submitStart = diag ? AuroraFrameDiagNowNs() : 0;
     int rc = NDL_DirectVideoPlay((void *) data, size, (long long) pts);
+    if (diag) {
+        AuroraFrameDiagLogFeedAt(pts, rq, submitStart,
+                                 (AuroraFrameDiagNowNs() - submitStart) / 1000ULL, (uint32_t) size);
+    }
     if (rc != 0) {
         SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL", "NDL_DirectVideoPlay returned %d: %s", rc,
                             NDL_DirectMediaGetError());
         return SS4S_VIDEO_FEED_ERROR;
+    }
+    if (!context->firstVideoFeedLogged) {
+        context->firstVideoFeedLogged = true;
+        SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "First video feed accepted");
     }
     uint64_t now = GetTimeUs();
     int renderBufferLength = 0;
@@ -93,6 +184,11 @@ static SS4S_VideoFeedResult FeedVideo(SS4S_VideoInstance *instance, const unsign
     }
     context->lastFrameTime = now;
     return SS4S_VIDEO_FEED_OK;
+}
+
+static SS4S_VideoFeedResult FeedVideo(SS4S_VideoInstance *instance, const unsigned char *data, size_t size,
+                                      SS4S_VideoFeedFlags flags) {
+    return FeedVideoWithPTS(instance, data, size, flags, -1);
 }
 
 static bool SizeChanged(SS4S_VideoInstance *instance, int width, int height) {
@@ -158,6 +254,7 @@ static bool SetHDRInfo(SS4S_VideoInstance *instance, const SS4S_VideoHDRInfo *in
 
 static void CloseVideo(SS4S_VideoInstance *instance) {
     SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "CloseVideo called");
+    Av1PtsReset(0, 0);
     pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
     SS4S_PlayerContext *context = (void *) instance;
     context->mediaInfo.video.type = 0;
@@ -191,6 +288,7 @@ const SS4S_VideoDriver SS4S_NDL_webOS5_VideoDriver = {
     .GetCapabilities = GetCapabilities,
     .Open = OpenVideo,
     .Feed = FeedVideo,
+    .FeedWithPTS = FeedVideoWithPTS,
     .SizeChanged = SizeChanged,
     .SetHDRInfo = SetHDRInfo,
     .Close = CloseVideo,

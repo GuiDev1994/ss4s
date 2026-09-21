@@ -1,7 +1,9 @@
 #include <assert.h>
+#include <stdlib.h>
 #include "StarfishMediaAPIs_C.h"
 #include "ss4s/modapi.h"
 #include "smp_player.h"
+#include "../../common/webos_pcm_51_remap.h"
 
 const char *StarfishAudioCodecName(SS4S_AudioCodec codec) {
     switch (codec) {
@@ -65,7 +67,28 @@ static void AudioClose(SS4S_AudioInstance *instance) {
 }
 
 static SS4S_AudioFeedResult AudioFeed(SS4S_AudioInstance *instance, const unsigned char *data, size_t size) {
-    switch (StarfishPlayerFeed((SS4S_PlayerContext *) instance, data, size, 2)) {
+    SS4S_PlayerContext *ctx = (SS4S_PlayerContext *) instance;
+    const unsigned char *feed = data;
+    size_t feed_size = size;
+    int16_t remap_stack[240 * 6];
+    int16_t *remap_heap = NULL;
+    if (ctx->audioInfo.codec == SS4S_AUDIO_PCM_S16LE && ctx->audioInfo.numOfChannels == 6 &&
+        size >= 6 * sizeof(int16_t) && (size % (6 * sizeof(int16_t))) == 0) {
+        int frames = (int) (size / (6 * sizeof(int16_t)));
+        int16_t *dst = remap_stack;
+        if ((size_t) frames * 6 > sizeof(remap_stack) / sizeof(remap_stack[0])) {
+            remap_heap = malloc(size);
+            dst = remap_heap;
+        }
+        if (dst != NULL) {
+            SS4S_WebOS_RemapPcm51ToDevice((const int16_t *) data, dst, frames);
+            feed = (const unsigned char *) dst;
+            feed_size = size;
+        }
+    }
+    FeedResult fr = StarfishPlayerFeed(ctx, feed, feed_size, 2);
+    free(remap_heap);
+    switch (fr) {
         case SMP_FEED_OK:
             return SS4S_AUDIO_FEED_OK;
         case SMP_FEED_NOT_READY:

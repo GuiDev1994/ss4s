@@ -21,16 +21,6 @@ int NDL_DirectAudioOpen(NDL_DIRECTAUDIO_DATA_INFO_T *data) {
     return 0;
 }
 
-int NDL_DirectAudioPlay(void *buffer, unsigned int size) {
-    mock_ndl_lock(__func__);
-    if (!audio_opened) {
-        mock_ndl_unlock(__func__);
-        return -1;
-    }
-    mock_ndl_unlock(__func__);
-    return 0;
-}
-
 int NDL_DirectAudioClose(void) {
     mock_ndl_lock(__func__);
     if (!audio_opened) {
@@ -61,16 +51,6 @@ int NDL_DirectVideoSetCallback(NDLVideoPlayCallback cb) {
     mock_ndl_lock(__func__);
     video_callback = cb;
     printf("[NDL] DirectVideo callback set\n");
-    mock_ndl_unlock(__func__);
-    return 0;
-}
-
-int NDL_DirectVideoPlay(void *buffer, unsigned int size) {
-    mock_ndl_lock(__func__);
-    if (!video_opened) {
-        mock_ndl_unlock(__func__);
-        return -1;
-    }
     mock_ndl_unlock(__func__);
     return 0;
 }

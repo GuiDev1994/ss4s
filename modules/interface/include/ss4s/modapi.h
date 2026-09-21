@@ -36,6 +36,11 @@ typedef struct SS4S_PlayerDriver {
     void (*Destroy)(SS4S_PlayerContext *context);
 
     void (*SetWaitAudioVideoReady)(SS4S_PlayerContext *context, bool option);
+
+    /**
+     * Optional. Update the panel-phase pacing mode for the video player.
+     */
+    void (*SetPanelPhaseLoosen)(SS4S_PlayerContext *context, bool loosen);
 } SS4S_PlayerDriver;
 
 typedef struct SS4S_AudioInstance SS4S_AudioInstance;
@@ -110,11 +115,24 @@ typedef struct SS4S_VideoDriver {
     SS4S_VideoFeedResult (*Feed)(SS4S_VideoInstance *instance, const unsigned char *data, size_t size,
                                  SS4S_VideoFeedFlags flags);
 
+    /**
+     * Optional. Same as Feed, with host presentation timestamp in microseconds.
+     * ptsUs < 0 means no host PTS (same as Feed).
+     */
+    SS4S_VideoFeedResult (*FeedWithPTS)(SS4S_VideoInstance *instance, const unsigned char *data, size_t size,
+                                        SS4S_VideoFeedFlags flags, int64_t ptsUs);
+
     bool (*SizeChanged)(SS4S_VideoInstance *instance, int width, int height);
 
     bool (*SetHDRInfo)(SS4S_VideoInstance *instance, const SS4S_VideoHDRInfo *info);
 
     bool (*SetDisplayArea)(SS4S_VideoInstance *instance, const SS4S_VideoRect *src, const SS4S_VideoRect *dst);
+
+    /**
+     * Optional. Read current video render-queue depth from the backend (e.g. Starfish).
+     * @return true if length was written; false if unsupported or unavailable
+     */
+    bool (*GetVideoRenderQueueLength)(SS4S_VideoInstance *instance, int *length);
 
     void (*Close)(SS4S_VideoInstance *instance);
 } SS4S_VideoDriver;

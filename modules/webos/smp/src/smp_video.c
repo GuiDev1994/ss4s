@@ -24,7 +24,8 @@ const char *StarfishVideoCodecName(SS4S_VideoCodec codec) {
 
 
 static bool GetVideoCapabilities(SS4S_VideoCapabilities *capabilities) {
-    capabilities->codecs = SS4S_VIDEO_H264 | SS4S_VIDEO_H265;
+    /* LG webOS 6+ Starfish advertises AV1 on OLED (C/G); enable for Aurora AV1 tests. */
+    capabilities->codecs = SS4S_VIDEO_H264 | SS4S_VIDEO_H265 | SS4S_VIDEO_AV1;
     capabilities->transform = SS4S_VIDEO_CAP_TRANSFORM_UI_COMPOSITING;
     capabilities->hdr = true;
     capabilities->colorSpace = SS4S_VIDEO_CAP_COLORSPACE_BT2020 | SS4S_VIDEO_CAP_COLORSPACE_BT709;
@@ -41,6 +42,7 @@ static SS4S_VideoOpenResult VideoOpen(const SS4S_VideoInfo *info, const SS4S_Vid
     StarfishPlayerLock(context);
     context->videoInfo = *info;
     context->hasVideo = true;
+    StarfishPlayerConfigureSmoothPacing(context, info->frameRateNumerator, info->frameRateDenominator);
     *instance = (void *) context;
     if (!context->hasAudio && context->waitAudioVideoReady) {
         StarfishLibContext->Log(SS4S_LogLevelInfo, "SMP", "VideoOpen: defer loading until audio is ready");
@@ -68,19 +70,28 @@ static void VideoClose(SS4S_VideoInstance *instance) {
 }
 
 
-static SS4S_VideoFeedResult VideoFeed(SS4S_VideoInstance *instance, const unsigned char *data, size_t size,
-                                      SS4S_VideoFeedFlags flags) {
+static SS4S_VideoFeedResult VideoFeedWithPTS(SS4S_VideoInstance *instance, const unsigned char *data, size_t size,
+                                             SS4S_VideoFeedFlags flags, int64_t ptsUs) {
     (void) flags;
-    switch (StarfishPlayerFeed((SS4S_PlayerContext *) instance, data, size, 1)) {
+    switch (StarfishPlayerFeedVideo((SS4S_PlayerContext *) instance, data, size, ptsUs)) {
         case SMP_FEED_OK:
             return SS4S_VIDEO_FEED_OK;
         case SMP_FEED_NOT_READY:
             return SS4S_VIDEO_FEED_NOT_READY;
         case SMP_FEED_BUFFER_FULL:
-            return SS4S_VIDEO_FEED_REQUEST_KEYFRAME;
+            /* Do NOT map to REQUEST_KEYFRAME: an IDR during backpressure is larger
+             * than a P-frame and makes BufferFull worse (visible hitch on pan).
+             * Treat like NOT_READY — drop this frame; session_video asks for one
+             * IDR after Feed succeeds again. */
+            return SS4S_VIDEO_FEED_NOT_READY;
         default:
             return SS4S_VIDEO_FEED_ERROR;
     }
+}
+
+static SS4S_VideoFeedResult VideoFeed(SS4S_VideoInstance *instance, const unsigned char *data, size_t size,
+                                      SS4S_VideoFeedFlags flags) {
+    return VideoFeedWithPTS(instance, data, size, flags, -1);
 }
 
 static bool SizeChanged(SS4S_VideoInstance *instance, int width, int height) {
@@ -154,7 +165,24 @@ static bool SetHDRInfo(SS4S_VideoInstance *instance, const SS4S_VideoHDRInfo *in
 }
 
 static bool SetDisplayArea(SS4S_VideoInstance *ctx, const SS4S_VideoRect *src, const SS4S_VideoRect *dst) {
+    (void) ctx;
+    (void) src;
+    (void) dst;
     return true;
+}
+
+static bool GetVideoRenderQueueLength(SS4S_VideoInstance *instance, int *length) {
+    if (instance == NULL || length == NULL) {
+        return false;
+    }
+    SS4S_PlayerContext *ctx = (SS4S_PlayerContext *) instance;
+    StarfishPlayerLock(ctx);
+    bool ok = false;
+    if (ctx->api != NULL) {
+        ok = StarfishMediaAPIs_getVideoRenderQueueLength(ctx->api, length);
+    }
+    StarfishPlayerUnlock(ctx);
+    return ok;
 }
 
 const SS4S_VideoDriver StarfishVideoDriver = {
@@ -162,8 +190,10 @@ const SS4S_VideoDriver StarfishVideoDriver = {
         .GetCapabilities = GetVideoCapabilities,
         .Open = VideoOpen,
         .Feed = VideoFeed,
+        .FeedWithPTS = VideoFeedWithPTS,
         .SizeChanged = SizeChanged,
         .SetHDRInfo = SetHDRInfo,
         .SetDisplayArea = SetDisplayArea,
+        .GetVideoRenderQueueLength = GetVideoRenderQueueLength,
         .Close = VideoClose,
 };
