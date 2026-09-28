@@ -86,19 +86,28 @@ static SS4S_AudioOpenResult OpenAudio(const SS4S_AudioInfo *info, SS4S_AudioInst
                     result = SS4S_AUDIO_OPEN_UNSUPPORTED_CODEC;
                     goto finish;
                 }
-                // Feed one empty frame to the decoder to ensure it is ready
+                /*
+                 * Empty-frame helper: primes NDL through LOADCOMPLETED and fills
+                 * host silence gaps (Apollo still ignores continuousAudio=1).
+                 * Without gap fill, NDL underruns and eARC briefly collapses to mono.
+                 */
+                uint32_t samplesPerFrame = info->samplesPerFrame ? info->samplesPerFrame : 240;
+                uint32_t frameDurationUs = 1000000u /
+                                           (opusConfig.sampleRate / samplesPerFrame);
                 context->opusEmpty = SS4S_OpusEmptyCreate(opusConfig.channels, opusConfig.streamCount,
-                                                          opusConfig.coupledCount);
+                                                          opusConfig.coupledCount, frameDurationUs);
                 if (!context->opusEmpty) {
                     result = SS4S_AUDIO_OPEN_ERROR;
                     goto finish;
                 }
                 if (opusConfig.channels == 6) {
                     SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
-                                        "Opus 5.1 streams=%d coupled=%d mapping=[%u,%u,%u,%u,%u,%u]",
+                                        "Opus 5.1 streams=%d coupled=%d mapping=[%u,%u,%u,%u,%u,%u] "
+                                        "frame=%uus",
                                         opusConfig.streamCount, opusConfig.coupledCount,
                                         opusConfig.mapping[0], opusConfig.mapping[1], opusConfig.mapping[2],
-                                        opusConfig.mapping[3], opusConfig.mapping[4], opusConfig.mapping[5]);
+                                        opusConfig.mapping[3], opusConfig.mapping[4], opusConfig.mapping[5],
+                                        (unsigned) frameDurationUs);
                 }
                 if (opusConfig.channels == 6 && !IsOpusPassthroughSupported(&opusConfig)) {
                     SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL",
@@ -153,7 +162,24 @@ static SS4S_AudioFeedResult FeedAudio(SS4S_AudioInstance *instance, const unsign
         pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
         return SS4S_AUDIO_FEED_NOT_READY;
     }
-    uint64_t pts = SS4S_NDL_webOS5_GetPts(context);
+    /*
+     * Skip while the gap-filler is mid-packet to avoid racing two Opus frames
+     * into NDL. FrameArrived also arms the next empty deadline (+10 frames).
+     */
+    bool emptyFeeding = false;
+    if (context->opusEmpty) {
+        emptyFeeding = SS4S_OpusEmptyFrameArrived(context->opusEmpty);
+    }
+    if (emptyFeeding) {
+        pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
+        return SS4S_AUDIO_FEED_OK;
+    }
+    /* Monotonic 5 ms PTS grid — wall-clock GetPts collided at ms granularity. */
+    int64_t pts = context->lastAudioPtsMs + 5;
+    if (pts < 0) {
+        pts = 0;
+    }
+    context->lastAudioPtsMs = pts;
     int rc = NDL_DirectAudioPlay((void *) data, size, (long long) pts);
     if (rc != 0) {
         SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL", "NDL_DirectAudioPlay returned %d: %s", rc,
@@ -174,12 +200,12 @@ static void CloseAudio(SS4S_AudioInstance *instance) {
         SS4S_NDLOpusFixDestroy(context->opusFix);
         context->opusFix = NULL;
     }
-    if (context->opusEmpty) {
-        SS4S_OpusEmptyDestroy(context->opusEmpty);
-        context->opusEmpty = NULL;
-    }
+    /* Join the gap-filler outside the driver lock — its feed callback takes it. */
+    SS4S_OpusEmpty *empty = context->opusEmpty;
+    context->opusEmpty = NULL;
     SS4S_NDL_webOS5_UnloadMedia(context);
     pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
+    SS4S_OpusEmptyDestroy(empty);
 }
 
 

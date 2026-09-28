@@ -27,6 +27,8 @@ static void PlayerSetWaitAudioVideoReady(SS4S_PlayerContext *context, bool optio
 static void PlayerSetPanelPhaseLoosen(SS4S_PlayerContext *context, bool loosen);
 
 static int OpusFeedEmpty(void *arg, const unsigned char *data, size_t size);
+static int OpusFeedEmptyFromThread(void *arg, const unsigned char *data, size_t size);
+static void StartAudioGapFiller(SS4S_PlayerContext *context);
 
 static void StopPrimeThread(SS4S_PlayerContext *context);
 
@@ -319,6 +321,15 @@ static void StopPrimeThread(SS4S_PlayerContext *context) {
     atomic_store(&context->primeStop, false);
 }
 
+static void StartAudioGapFiller(SS4S_PlayerContext *context) {
+    if (!context || !context->opusEmpty || !context->mediaLoaded) {
+        return;
+    }
+    SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
+                        "Audio gap filler armed (covers host silence / missing continuousAudio)");
+    SS4S_OpusEmptyStart(context->opusEmpty, OpusFeedEmptyFromThread, context);
+}
+
 static int FeedOnePrimePacket(SS4S_PlayerContext *context, int64_t pts_ms) {
     if (context->mediaInfo.audio.type == NDL_AUDIO_TYPE_PCM) {
         unsigned short empty_buf[8] = {0};
@@ -329,15 +340,23 @@ static int FeedOnePrimePacket(SS4S_PlayerContext *context, int64_t pts_ms) {
             numChannels = 6;
         }
         size_t size = (size_t) numChannels * sizeof(unsigned short);
-        return NDL_DirectAudioPlay(empty_buf, size, pts_ms);
+        int rc = NDL_DirectAudioPlay(empty_buf, size, pts_ms);
+        if (rc == 0) {
+            context->lastAudioPtsMs = pts_ms;
+        }
+        return rc;
     }
     if (context->opusEmpty != NULL) {
-        context->lastAudioPtsMs = pts_ms;
+        /* OpusFeedEmpty advances lastAudioPtsMs by NDL_PRIME_PACKET_MS. */
         return SS4S_OpusEmptyFeed(context->opusEmpty, OpusFeedEmpty, context);
     }
     /* Audio arm present but no empty-frame helper yet (Opus without codec data). */
     unsigned char silence[3] = {0xec, 0xff, 0xfe};
-    return NDL_DirectAudioPlay(silence, sizeof(silence), pts_ms);
+    int rc = NDL_DirectAudioPlay(silence, sizeof(silence), pts_ms);
+    if (rc == 0) {
+        context->lastAudioPtsMs = pts_ms;
+    }
+    return rc;
 }
 
 static void FeedPrimeBurst(SS4S_PlayerContext *context) {
@@ -351,14 +370,13 @@ static void FeedPrimeBurst(SS4S_PlayerContext *context) {
     int64_t target_ms = now_ms + NDL_PRIME_LEAD_PACKETS * NDL_PRIME_PACKET_MS;
     int64_t pts_ms = context->lastAudioPtsMs;
     while (pts_ms < target_ms) {
-        pts_ms += NDL_PRIME_PACKET_MS;
-        if (FeedOnePrimePacket(context, pts_ms) != 0) {
+        if (FeedOnePrimePacket(context, pts_ms + NDL_PRIME_PACKET_MS) != 0) {
             SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL",
                                 "Audio prime rejected at %lld ms: %s",
-                                (long long) pts_ms, NDL_DirectMediaGetError());
+                                (long long) (pts_ms + NDL_PRIME_PACKET_MS), NDL_DirectMediaGetError());
             break;
         }
-        context->lastAudioPtsMs = pts_ms;
+        pts_ms = context->lastAudioPtsMs;
     }
 }
 
@@ -428,6 +446,7 @@ bool SS4S_NDL_webOS5_EnsureVideoFeedReady(SS4S_PlayerContext *context) {
         if (context->primeThreadRunning) {
             pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
             StopPrimeThread(context);
+            StartAudioGapFiller(context);
             pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
         }
         return true;
@@ -439,6 +458,7 @@ bool SS4S_NDL_webOS5_EnsureVideoFeedReady(SS4S_PlayerContext *context) {
                             (long long) NdlElapsedMs(context));
         pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
         StopPrimeThread(context);
+        StartAudioGapFiller(context);
         pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
         return true;
     }
@@ -753,6 +773,9 @@ static int LoadMedia(SS4S_PlayerContext *context) {
         PrimeAudioUntil(context, NDL_AUDIO_PRIME_BUDGET_MS);
         if (!atomic_load(&context->loadCompleted) && context->mediaLoaded) {
             StartPrimeContinuation(context);
+        } else {
+            /* LOADCOMPLETED already landed during the budgeted prime. */
+            StartAudioGapFiller(context);
         }
     } else {
         /* Video-only: unblock once feed-anyway elapses; LOADCOMPLETED still preferred. */
@@ -823,13 +846,25 @@ static void LoadCallback(int type, long long numValue, const char *strValue) {
 }
 
 static int OpusFeedEmpty(void *arg, const unsigned char *data, size_t size) {
+    /* Caller must hold SS4S_NDL_webOS5_Lock (prime path). */
     SS4S_PlayerContext *context = arg;
-    int64_t pts = context->lastAudioPtsMs;
-    if (pts <= 0) {
-        pts = NdlElapsedMs(context);
-        if (pts < 0) {
-            pts = 0;
-        }
+    if (!context->mediaLoaded) {
+        return -1;
     }
-    return NDL_DirectAudioPlay((void *) data, size, pts);
+    int64_t pts = context->lastAudioPtsMs + NDL_PRIME_PACKET_MS;
+    if (pts < 0) {
+        pts = 0;
+    }
+    int rc = NDL_DirectAudioPlay((void *) data, size, pts);
+    if (rc == 0) {
+        context->lastAudioPtsMs = pts;
+    }
+    return rc;
+}
+
+static int OpusFeedEmptyFromThread(void *arg, const unsigned char *data, size_t size) {
+    pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
+    int rc = OpusFeedEmpty(arg, data, size);
+    pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
+    return rc;
 }

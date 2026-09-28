@@ -9,19 +9,29 @@ typedef struct SS4S_OpusEmpty SS4S_OpusEmpty;
 typedef int (*SS4S_NDLOpusEmptyFeedFunc)(void *arg, const unsigned char *data, size_t size);
 
 /**
- * Create an instance of the empty frame generator.
- * @param channels Number of channels
- * @param streams Number of opus streams
- * @param coupled Number of coupled streams
- * @return Frame generator instance
+ * Create an empty-frame helper. Spawns a background thread that waits for
+ * SS4S_OpusEmptyStart before producing silence on gaps.
+ *
+ * @param frameDurationUs Duration of one Opus frame in microseconds (e.g. 5000)
  */
-SS4S_OpusEmpty *SS4S_OpusEmptyCreate(uint32_t channels, uint32_t streams, uint32_t coupled);
+SS4S_OpusEmpty *SS4S_OpusEmptyCreate(uint32_t channels, uint32_t streams, uint32_t coupled,
+                                     uint32_t frameDurationUs);
 
 /**
- * Feed 1 empty frame
- * @param instance Frame generator instance
- * @param feed Feed function
- * @param feedArg Context for the feed function
+ * Begin runtime gap filling. After ~10 missing frames of real audio, empty
+ * Opus packets are fed so NDL/eARC does not underrun into mono distortion.
+ */
+void SS4S_OpusEmptyStart(SS4S_OpusEmpty *instance, SS4S_NDLOpusEmptyFeedFunc feed, void *feedArg);
+
+/**
+ * Real audio arrived: postpone empty filling. Returns true while the filler
+ * thread is mid-packet (caller should skip this real frame to avoid races).
+ */
+bool SS4S_OpusEmptyFrameArrived(SS4S_OpusEmpty *instance);
+
+/**
+ * Feed exactly one empty frame (used by the LOADCOMPLETED prime path).
+ * Caller supplies the feed callback; no gap timer is involved.
  */
 int SS4S_OpusEmptyFeed(SS4S_OpusEmpty *instance, SS4S_NDLOpusEmptyFeedFunc feed, void *feedArg);
 
