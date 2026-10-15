@@ -108,6 +108,8 @@ void SS4S_NDL_webOS5_ConfigureSmoothPacing(SS4S_PlayerContext *context, int fpsN
 /** False until LOADCOMPLETED or feed-anyway; video Feed should return NOT_READY. */
 bool SS4S_NDL_webOS5_EnsureVideoFeedReady(SS4S_PlayerContext *context);
 
+int SS4S_NDL_webOS5_EnsureInit(void);
+
 int SS4S_NDL_webOS5_Driver_PostInit(int argc, char *argv[]);
 
 void SS4S_NDL_webOS5_Driver_Quit();

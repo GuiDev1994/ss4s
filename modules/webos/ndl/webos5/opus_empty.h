@@ -24,8 +24,9 @@ SS4S_OpusEmpty *SS4S_OpusEmptyCreate(uint32_t channels, uint32_t streams, uint32
 void SS4S_OpusEmptyStart(SS4S_OpusEmpty *instance, SS4S_NDLOpusEmptyFeedFunc feed, void *feedArg);
 
 /**
- * Real audio arrived: postpone empty filling. Returns true while the filler
- * thread is mid-packet (caller should skip this real frame to avoid races).
+ * Real audio arrived: postpone empty filling. Returns true while an empty
+ * packet is being submitted. Callers must still play the real frame; both
+ * paths take the NDL lock, and dropping the real frame is an audible cut.
  */
 bool SS4S_OpusEmptyFrameArrived(SS4S_OpusEmpty *instance);
 

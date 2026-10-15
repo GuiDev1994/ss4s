@@ -87,9 +87,10 @@ static SS4S_AudioOpenResult OpenAudio(const SS4S_AudioInfo *info, SS4S_AudioInst
                     goto finish;
                 }
                 /*
-                 * Empty-frame helper: primes NDL through LOADCOMPLETED and fills
-                 * host silence gaps (Apollo still ignores continuousAudio=1).
-                 * Without gap fill, NDL underruns and eARC briefly collapses to mono.
+                 * Empty-frame helper is the LOADCOMPLETED prime only. A steady-state
+                 * metronome (silence packets after the prime) is what punktfunk
+                 * removed and what made 5.1 cut: those packets raced real Opus
+                 * frames and the feed path dropped the real ones.
                  */
                 uint32_t samplesPerFrame = info->samplesPerFrame ? info->samplesPerFrame : 240;
                 uint32_t frameDurationUs = 1000000u /
@@ -163,22 +164,17 @@ static SS4S_AudioFeedResult FeedAudio(SS4S_AudioInstance *instance, const unsign
         return SS4S_AUDIO_FEED_NOT_READY;
     }
     /*
-     * Skip while the gap-filler is mid-packet to avoid racing two Opus frames
-     * into NDL. FrameArrived also arms the next empty deadline (+10 frames).
+     * Stamp on the player clock and do not step past it. A +5 ms or +1 ms
+     * grid ratchets ahead on every burst (the lead only grows) and NDL then
+     * cuts 5.1. Floor at the last stamp so a packet cannot rewind under the
+     * prime — a rewind mutes the plane — and otherwise use the clock as-is.
+     * Same rule as punktfunk's NDL plane (lead 0).
      */
-    bool emptyFeeding = false;
-    if (context->opusEmpty) {
-        emptyFeeding = SS4S_OpusEmptyFrameArrived(context->opusEmpty);
+    int64_t now_ms = (int64_t) SS4S_NDL_webOS5_GetPts(context);
+    if (now_ms < 0) {
+        now_ms = 0;
     }
-    if (emptyFeeding) {
-        pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
-        return SS4S_AUDIO_FEED_OK;
-    }
-    /* Monotonic 5 ms PTS grid — wall-clock GetPts collided at ms granularity. */
-    int64_t pts = context->lastAudioPtsMs + 5;
-    if (pts < 0) {
-        pts = 0;
-    }
+    int64_t pts = context->lastAudioPtsMs > now_ms ? context->lastAudioPtsMs : now_ms;
     context->lastAudioPtsMs = pts;
     int rc = NDL_DirectAudioPlay((void *) data, size, (long long) pts);
     if (rc != 0) {

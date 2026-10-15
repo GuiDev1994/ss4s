@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <time.h>
 #include <unistd.h>
+#include <dlfcn.h>
 
 #include "opus_empty.h"
 #include "../../common/aurora_frame_diag.h"
@@ -27,8 +28,6 @@ static void PlayerSetWaitAudioVideoReady(SS4S_PlayerContext *context, bool optio
 static void PlayerSetPanelPhaseLoosen(SS4S_PlayerContext *context, bool loosen);
 
 static int OpusFeedEmpty(void *arg, const unsigned char *data, size_t size);
-static int OpusFeedEmptyFromThread(void *arg, const unsigned char *data, size_t size);
-static void StartAudioGapFiller(SS4S_PlayerContext *context);
 
 static void StopPrimeThread(SS4S_PlayerContext *context);
 
@@ -321,15 +320,6 @@ static void StopPrimeThread(SS4S_PlayerContext *context) {
     atomic_store(&context->primeStop, false);
 }
 
-static void StartAudioGapFiller(SS4S_PlayerContext *context) {
-    if (!context || !context->opusEmpty || !context->mediaLoaded) {
-        return;
-    }
-    SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
-                        "Audio gap filler armed (covers host silence / missing continuousAudio)");
-    SS4S_OpusEmptyStart(context->opusEmpty, OpusFeedEmptyFromThread, context);
-}
-
 static int FeedOnePrimePacket(SS4S_PlayerContext *context, int64_t pts_ms) {
     if (context->mediaInfo.audio.type == NDL_AUDIO_TYPE_PCM) {
         unsigned short empty_buf[8] = {0};
@@ -446,8 +436,9 @@ bool SS4S_NDL_webOS5_EnsureVideoFeedReady(SS4S_PlayerContext *context) {
         if (context->primeThreadRunning) {
             pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
             StopPrimeThread(context);
-            StartAudioGapFiller(context);
             pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
+            SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
+                                "Audio prime done; steady-state gap filler left off");
         }
         return true;
     }
@@ -458,8 +449,9 @@ bool SS4S_NDL_webOS5_EnsureVideoFeedReady(SS4S_PlayerContext *context) {
                             (long long) NdlElapsedMs(context));
         pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
         StopPrimeThread(context);
-        StartAudioGapFiller(context);
         pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
+        SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
+                            "Audio prime done; steady-state gap filler left off");
         return true;
     }
     if (NdlElapsedMs(context) >= NDL_FEED_ANYWAY_AFTER_MS) {
@@ -735,13 +727,15 @@ static int LoadMedia(SS4S_PlayerContext *context) {
     int ret;
     if (!SS4S_NDL_webOS5_Initialized) {
         SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "Initializing NDL");
-        if ((ret = NDL_DirectMediaInit(getenv("APPID"), NULL)) != 0) {
-            SS4S_NDL_webOS5_Log(SS4S_LogLevelError, "NDL", "Failed to init: ret=%d, error=%s", ret,
-                                NDL_DirectMediaGetError());
+        /* Caller holds SS4S_NDL_webOS5_Lock. EnsureInit locks it again.
+         * Drop it across the call or OpenVideo deadlocks and the video ping
+         * thread never starts (host: Initial Ping Timeout, UI stuck on Connecting). */
+        pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
+        ret = SS4S_NDL_webOS5_EnsureInit();
+        pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
+        if (ret != 0) {
             return ret;
         }
-        SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "NDL_DirectMediaInit succeeded");
-        SS4S_NDL_webOS5_Initialized = true;
     }
     assert(SS4S_NDL_webOS5_Initialized);
     assert(!context->mediaLoaded);
@@ -766,6 +760,15 @@ static int LoadMedia(SS4S_PlayerContext *context) {
                             NDL_DirectMediaGetError());
         return ret;
     }
+    {
+        void *shim = dlopen("libSDL2-2.0.so.0", RTLD_LAZY | RTLD_NOLOAD);
+        void (*apply)(int, int) = shim != NULL ? dlsym(shim, "aurora_ndl_apply_video_rect") : NULL;
+        if (apply != NULL && info.video.width > 0 && info.video.height > 0) {
+            apply(info.video.width, info.video.height);
+            SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "Exported window source %dx%d",
+                                info.video.width, info.video.height);
+        }
+    }
     SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "NDL_DirectMediaLoad accepted (awaiting LOADCOMPLETED)");
     context->mediaLoaded = true;
 
@@ -775,7 +778,8 @@ static int LoadMedia(SS4S_PlayerContext *context) {
             StartPrimeContinuation(context);
         } else {
             /* LOADCOMPLETED already landed during the budgeted prime. */
-            StartAudioGapFiller(context);
+            SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
+                                "Audio prime done; steady-state gap filler left off");
         }
     } else {
         /* Video-only: unblock once feed-anyway elapses; LOADCOMPLETED still preferred. */
@@ -862,9 +866,3 @@ static int OpusFeedEmpty(void *arg, const unsigned char *data, size_t size) {
     return rc;
 }
 
-static int OpusFeedEmptyFromThread(void *arg, const unsigned char *data, size_t size) {
-    pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
-    int rc = OpusFeedEmpty(arg, data, size);
-    pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
-    return rc;
-}
