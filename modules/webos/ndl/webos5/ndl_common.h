@@ -29,6 +29,25 @@ struct SS4S_PlayerContext {
     bool primeThreadRunning;
     pthread_t primeThread;
     int64_t lastAudioPtsMs;
+    /* Fixed stamp lead on real audio (SS4S_NDL_AUDIO_LEAD_MS): jitter slack for the plane. */
+    int64_t audioLeadMs;
+    unsigned audioPlcFrames;
+    /* 1 s audio feed window: bunching shows as repeated stamps and a long max gap. */
+    unsigned audioWinFeeds;
+    unsigned audioWinRepeats;
+    int64_t audioWinMaxGapMs;
+    int64_t audioWinMaxAheadMs;
+    int64_t audioLastFeedMs;
+    /*
+     * Opus plane only (SS4S_NDL_AUDIO_SEQUENTIAL_PTS): stamps step by one frame instead of
+     * repeating the arrival millisecond, and packets past audioMaxAheadMs are shed.
+     */
+    bool audioSequentialPts;
+    int64_t audioFrameMs;
+    int64_t audioMaxAheadMs;
+    unsigned audioWinShed;
+    /* Audio plane occupancy log (1/s): a growing plane drags video presentation with it. */
+    int64_t lastAudioFillLogMs;
     bool firstVideoFeedLogged;
     bool waitAudioVideoReady;
     _Atomic bool panelPhaseLoosen;

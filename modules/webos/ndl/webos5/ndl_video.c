@@ -164,7 +164,7 @@ static SS4S_VideoFeedResult FeedVideoWithPTS(SS4S_VideoInstance *instance, const
     int rc = NDL_DirectVideoPlay((void *) data, size, (long long) pts);
     if (diag) {
         AuroraFrameDiagLogFeedAt(pts, rq, submitStart,
-                                 (AuroraFrameDiagNowNs() - submitStart) / 1000ULL, (uint32_t) size);
+                                 (AuroraFrameDiagNowNs() - submitStart) / 1000ULL, (uint32_t) size, ptsUs);
     }
     if (rc != 0) {
         SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL", "NDL_DirectVideoPlay returned %d: %s", rc,

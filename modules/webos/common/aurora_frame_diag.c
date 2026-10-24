@@ -138,11 +138,11 @@ uint64_t AuroraFrameDiagNowNs(void) {
 }
 
 void AuroraFrameDiagLogFeed(uint64_t pts, int render_queue_length) {
-    AuroraFrameDiagLogFeedAt(pts, render_queue_length, 0, 0, 0);
+    AuroraFrameDiagLogFeedAt(pts, render_queue_length, 0, 0, 0, -1);
 }
 
 void AuroraFrameDiagLogFeedAt(uint64_t pts, int render_queue_length, uint64_t feed_wall_ns,
-                              uint64_t submit_us, uint32_t bytes) {
+                              uint64_t submit_us, uint32_t bytes, int64_t host_pts_us) {
     if (!AuroraFrameDiagEnabled()) {
         return;
     }
@@ -164,7 +164,7 @@ void AuroraFrameDiagLogFeedAt(uint64_t pts, int render_queue_length, uint64_t fe
                      "{\"type\":\"feed\",\"backend\":\"%s\",\"frame\":%llu,"
                      "\"feed_wallclock_ns\":%llu,\"pts\":%llu,\"render_queue_length\":%d,"
                      "\"delta_feed_wall_ns\":%lld,\"delta_pts\":%lld,"
-                     "\"submit_us\":%llu,\"bytes\":%u}\n",
+                     "\"submit_us\":%llu,\"bytes\":%u,\"host_pts_us\":%lld}\n",
                      diag_backend,
                      (unsigned long long) diag_frame_number,
                      (unsigned long long) wall,
@@ -173,7 +173,8 @@ void AuroraFrameDiagLogFeedAt(uint64_t pts, int render_queue_length, uint64_t fe
                      (long long) d_wall,
                      (long long) d_pts,
                      (unsigned long long) submit_us,
-                     bytes);
+                     bytes,
+                     (long long) host_pts_us);
     if (n > 0 && (size_t) n < sizeof(line)) {
         DiagAppendLocked(line, (size_t) n);
     }

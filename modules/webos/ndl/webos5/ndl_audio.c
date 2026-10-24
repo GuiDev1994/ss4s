@@ -51,6 +51,36 @@ static SS4S_AudioOpenResult OpenAudio(const SS4S_AudioInfo *info, SS4S_AudioInst
                                       SS4S_PlayerContext *context) {
     SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "OpenAudio called");
     pthread_mutex_lock(&SS4S_NDL_webOS5_Lock);
+    context->audioLeadMs = 0;
+    context->audioPlcFrames = 0;
+    context->audioWinFeeds = 0;
+    context->audioWinRepeats = 0;
+    context->audioWinMaxGapMs = 0;
+    context->audioWinMaxAheadMs = 0;
+    context->audioLastFeedMs = 0;
+    context->audioWinShed = 0;
+    context->audioFrameMs = 5;
+    const char *seqEnv = getenv("SS4S_NDL_AUDIO_SEQUENTIAL_PTS");
+    context->audioSequentialPts = info->codec == SS4S_AUDIO_OPUS && (seqEnv == NULL || strcmp(seqEnv, "0") != 0);
+    const char *leadEnv = getenv("SS4S_NDL_AUDIO_LEAD_MS");
+    if (leadEnv != NULL && leadEnv[0] != 0) {
+        long lead = strtol(leadEnv, NULL, 10);
+        if (lead > 0 && lead <= 150) {
+            context->audioLeadMs = lead;
+        }
+    }
+    if (info->samplesPerFrame > 0 && info->sampleRate > 0) {
+        context->audioFrameMs = (int64_t) info->samplesPerFrame * 1000 / info->sampleRate;
+        if (context->audioFrameMs <= 0) {
+            context->audioFrameMs = 1;
+        }
+    }
+    /* Pairs arrive together (~10 ms apart), so one frame ahead is normal; past a few frames
+     * the host clock is running ahead of ours and the excess is shed instead of kept. */
+    context->audioMaxAheadMs = 4 * context->audioFrameMs;
+    SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "Audio stamp lead %lld ms, sequential stamps %s (frame %lld ms)",
+                        (long long) context->audioLeadMs, context->audioSequentialPts ? "on" : "off",
+                        (long long) context->audioFrameMs);
     SS4S_AudioOpenResult result;
     switch (info->codec) {
         case SS4S_AUDIO_PCM_S16LE: {
@@ -144,12 +174,31 @@ static SS4S_AudioOpenResult OpenAudio(const SS4S_AudioInfo *info, SS4S_AudioInst
     return result;
 }
 
+typedef struct {
+    int64_t pts;
+} PlcStamp;
+
+static int PlayPlcSilence(void *arg, const unsigned char *data, size_t size) {
+    const PlcStamp *stamp = arg;
+    return NDL_DirectAudioPlay((void *) data, size, (long long) stamp->pts);
+}
+
 static SS4S_AudioFeedResult FeedAudio(SS4S_AudioInstance *instance, const unsigned char *data, size_t size) {
     SS4S_PlayerContext *context = (void *) instance;
     if (!context->mediaLoaded) {
         return SS4S_AUDIO_FEED_NOT_READY;
     }
-    if (context->opusFix) {
+    /*
+     * Limelight signals a lost packet with (NULL, 0) so the decoder can conceal it. Opus is
+     * passed through to NDL undecoded, so there is no PLC here: feeding NULL fails and leaves
+     * a hole in the plane. Substitute one silent frame of the same layout instead, stamped
+     * like a real packet, so the timeline keeps moving.
+     */
+    const bool lost = data == NULL || size == 0;
+    if (lost && context->opusEmpty == NULL) {
+        return SS4S_AUDIO_FEED_OK;
+    }
+    if (!lost && context->opusFix) {
         int fixedSize = SS4S_NDLOpusFixProcess(context->opusFix, data, size);
         if (fixedSize < 0) {
             SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL", "SS4S_NDLOpusFixProcess returned %d", fixedSize);
@@ -164,24 +213,77 @@ static SS4S_AudioFeedResult FeedAudio(SS4S_AudioInstance *instance, const unsign
         return SS4S_AUDIO_FEED_NOT_READY;
     }
     /*
-     * Stamp on the player clock and do not step past it. A +5 ms or +1 ms
-     * grid ratchets ahead on every burst (the lead only grows) and NDL then
-     * cuts 5.1. Floor at the last stamp so a packet cannot rewind under the
-     * prime — a rewind mutes the plane — and otherwise use the clock as-is.
-     * Same rule as punktfunk's NDL plane (lead 0).
+     * Stamp on the player clock plus a fixed lead, and do not step below the last stamp.
+     * A +5 ms or +1 ms per-packet grid ratchets ahead on every burst (the lead only grows)
+     * and NDL then cuts 5.1; a constant lead does not. Floor at the last stamp so a packet
+     * cannot rewind under the prime — a rewind mutes the plane. The lead is what lets a late
+     * burst arrive before the plane runs dry (punktfunk: raise it first if offload drops out).
      */
     int64_t now_ms = (int64_t) SS4S_NDL_webOS5_GetPts(context);
     if (now_ms < 0) {
         now_ms = 0;
     }
-    int64_t pts = context->lastAudioPtsMs > now_ms ? context->lastAudioPtsMs : now_ms;
+    int64_t due_ms = now_ms + context->audioLeadMs;
+    int64_t pts = context->lastAudioPtsMs > due_ms ? context->lastAudioPtsMs : due_ms;
+    if (context->audioSequentialPts && context->lastAudioPtsMs > 0) {
+        /*
+         * Limelight hands packets over in pairs, so the arrival millisecond repeats for ~45% of
+         * them (C5/G5 logs: 80-96 repeated stamps per 200). NDL's Opus plane treats a repeated
+         * stamp as an overlapping buffer and drops audio: 5.1 cuts while PCM, which plays by
+         * sample count, does not. Step one frame past the last stamp instead. That can only run
+         * ahead (the old +5 ms grid ratcheted), so a packet more than audioMaxAheadMs ahead of
+         * the clock is shed: one 5 ms frame lost beats a lead that never comes back.
+         */
+        int64_t next_ms = context->lastAudioPtsMs + context->audioFrameMs;
+        if (next_ms > due_ms) {
+            if (next_ms - due_ms > context->audioMaxAheadMs) {
+                context->audioWinShed++;
+                pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
+                return SS4S_AUDIO_FEED_OK;
+            }
+            pts = next_ms;
+        }
+    }
+    if (pts == context->lastAudioPtsMs) {
+        context->audioWinRepeats++;
+    }
+    if (pts - due_ms > context->audioWinMaxAheadMs) {
+        context->audioWinMaxAheadMs = pts - due_ms;
+    }
+    if (context->audioLastFeedMs > 0 && now_ms - context->audioLastFeedMs > context->audioWinMaxGapMs) {
+        context->audioWinMaxGapMs = now_ms - context->audioLastFeedMs;
+    }
+    context->audioLastFeedMs = now_ms;
+    context->audioWinFeeds++;
     context->lastAudioPtsMs = pts;
-    int rc = NDL_DirectAudioPlay((void *) data, size, (long long) pts);
+    int rc;
+    if (lost) {
+        PlcStamp stamp = {.pts = pts};
+        rc = SS4S_OpusEmptyFeed(context->opusEmpty, PlayPlcSilence, &stamp);
+        context->audioPlcFrames++;
+    } else {
+        rc = NDL_DirectAudioPlay((void *) data, size, (long long) pts);
+    }
     if (rc != 0) {
-        SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL", "NDL_DirectAudioPlay returned %d: %s", rc,
-                            NDL_DirectMediaGetError());
+        SS4S_NDL_webOS5_Log(SS4S_LogLevelWarn, "NDL", "NDL_DirectAudioPlay%s returned %d: %s",
+                            lost ? " (PLC silence)" : "", rc, NDL_DirectMediaGetError());
         pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
         return SS4S_AUDIO_FEED_ERROR;
+    }
+    if (now_ms - context->lastAudioFillLogMs >= 1000) {
+        context->lastAudioFillLogMs = now_ms;
+        /* 5 ms Opus frames: ~200 feeds/s. Repeats = packets stamped on the previous stamp. */
+        SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
+                            "Audio feed 1s: %u packets, %u repeated stamps, max gap %lld ms, "
+                            "max stamp ahead of due %lld ms, lead %lld ms, PLC %u, shed %u",
+                            context->audioWinFeeds, context->audioWinRepeats,
+                            (long long) context->audioWinMaxGapMs, (long long) context->audioWinMaxAheadMs,
+                            (long long) context->audioLeadMs, context->audioPlcFrames, context->audioWinShed);
+        context->audioWinFeeds = 0;
+        context->audioWinRepeats = 0;
+        context->audioWinMaxGapMs = 0;
+        context->audioWinMaxAheadMs = 0;
+        context->audioWinShed = 0;
     }
     pthread_mutex_unlock(&SS4S_NDL_webOS5_Lock);
     return SS4S_AUDIO_FEED_OK;

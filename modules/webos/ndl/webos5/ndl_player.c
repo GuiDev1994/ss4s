@@ -753,6 +753,7 @@ static int LoadMedia(SS4S_PlayerContext *context) {
     atomic_store(&context->feedUnblocked, false);
     context->firstVideoFeedLogged = false;
     context->lastAudioPtsMs = 0;
+    context->lastAudioFillLogMs = 0;
     /* PTS domain origin is the load CALL, matching pf-webOS load_instant. */
     clock_gettime(CLOCK_MONOTONIC, &context->mediaLoadedTime);
     if ((ret = NDL_DirectMediaLoad(&info, LoadCallback)) != 0) {

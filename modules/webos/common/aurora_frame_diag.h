@@ -32,10 +32,11 @@ void AuroraFrameDiagLogFeed(uint64_t pts, int render_queue_length);
  * Same record plus decoder-submit cost. `feed_wall_ns` is taken before handing the frame to the
  * decoder; `submit_us` is how long that handoff blocked, which is the only visible sign of
  * backpressure on backends that expose no queue depth. Both `submit_us` and `bytes` are 0 when
- * the caller does not measure them.
+ * the caller does not measure them. `host_pts_us` is the host capture timestamp of the frame
+ * (-1 when unknown); against `feed_wallclock_ns` it shows arrival drift and jitter.
  */
 void AuroraFrameDiagLogFeedAt(uint64_t pts, int render_queue_length, uint64_t feed_wall_ns,
-                              uint64_t submit_us, uint32_t bytes);
+                              uint64_t submit_us, uint32_t bytes, int64_t host_pts_us);
 
 /** SMP Load() callback tap for backpressure / drop events. */
 void AuroraFrameDiagLogEvent(int event_type, int64_t num_value, const char *str_value);
