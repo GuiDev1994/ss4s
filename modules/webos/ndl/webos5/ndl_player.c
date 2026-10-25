@@ -11,6 +11,7 @@
 
 #include "opus_empty.h"
 #include "../../common/aurora_frame_diag.h"
+#include "../../common/frame_drop_threshold.h"
 
 /* pf-webOS NDL v2 load prime (client-webos f93738278 / PR #249). */
 #define NDL_AUDIO_PRIME_BUDGET_MS 500
@@ -726,19 +727,9 @@ static int UnloadMedia(SS4S_PlayerContext *context) {
 /* NDL copies the threshold into the next load payload, clears it on unload and ignores values below 2. */
 static void ArmFrameDropThreshold(const SS4S_PlayerContext *context) {
     const NDL_DIRECTMEDIA_DATA_INFO_T *info = &context->mediaInfo;
-    const char *env = getenv("SS4S_NDL_FRAME_DROP_THRESHOLD");
-    int threshold = info->video.width >= 3840 ? 2 : 0;
-    if (env != NULL && env[0] != '\0') {
-        long frames = strtol(env, NULL, 10);
-        if (frames < 2) {
-            threshold = 0;
-        } else if (frames <= 8) {
-            threshold = (int) frames;
-        }
-    } else {
-        env = "unset";
-    }
-    if (info->video.type == 0 || info->video.type == NDL_VIDEO_TYPE_AV1) {
+    const char *env;
+    int threshold = SS4S_FrameDropThreshold(info->video.width, info->video.type == NDL_VIDEO_TYPE_AV1, &env);
+    if (info->video.type == 0) {
         threshold = 0;
     } else if (threshold > 0 && threshold <= context->renderQueueTarget) {
         threshold = context->renderQueueTarget + 1;
