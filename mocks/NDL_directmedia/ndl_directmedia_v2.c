@@ -13,6 +13,7 @@ int NDL_DirectMediaUnload(void) {
     }
     audio_opened = false;
     video_opened = false;
+    mock_ndl_note_unload();
     mock_ndl_unlock(__func__);
     return 0;
 }
@@ -27,6 +28,7 @@ int NDL_DirectMediaLoad(NDL_DIRECTMEDIA_DATA_INFO_T *data, NDLMediaLoadCallback 
      * expire the audio-prime budget before confirmation (webOS 26 / issue #188 shape). */
     audio_opened = data->audio.type != 0;
     video_opened = data->video.type != 0;
+    mock_ndl_note_load();
     mock_ndl_store_load_callback(callback);
     mock_ndl_unlock(__func__);
     mock_ndl_maybe_schedule_load_completed();
@@ -94,7 +96,7 @@ int NDL_DirectVideoPlay(void *buffer, unsigned int size, long long pts) {
 }
 
 int NDL_DirectVideoSetFrameDropThreshold(int threshold) {
-    (void) threshold;
+    mock_ndl_note_frame_drop_threshold(threshold);
     return 0;
 }
 
