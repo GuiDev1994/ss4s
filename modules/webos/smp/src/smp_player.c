@@ -3,7 +3,6 @@
 #include "StarfishMediaAPIs_C.h"
 #include "../../common/panel_phase_pts.h"
 #include "../../common/aurora_frame_diag.h"
-#include "../../common/frame_drop_threshold.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -689,30 +688,15 @@ jvalue_ref MakeLoadPayload(SS4S_PlayerContext *ctx, const SS4S_AudioInfo *audioI
     const bool pauseAtDecodeTime = PauseAtDecodeTimeEnvEnabled();
     StarfishLibContext->Log(SS4S_LogLevelInfo, "SMP", "pauseAtDecodeTime=%s",
                             pauseAtDecodeTime ? "true" : "false");
-    jvalue_ref esInfo = jobject_create_var(
-        jkeyval(J_CSTR_TO_JVAL("pauseAtDecodeTime"), jboolean_create(pauseAtDecodeTime)),
-        jkeyval(J_CSTR_TO_JVAL("ptsToDecode"), jnumber_create_i64(0)),
-        jkeyval(J_CSTR_TO_JVAL("seperatedPTS"), jboolean_true()),
-        J_END_OBJ_DECL
-    );
-    if (videoInfo != NULL) {
-        const char *setting;
-        int threshold = SS4S_FrameDropThreshold(videoInfo->width, videoInfo->codec == SS4S_VIDEO_AV1, &setting);
-        if (threshold > 0) {
-            jobject_set(esInfo, J_CSTR_TO_BUF("videoRenderQueueThreshold"), jnumber_create_i32(threshold));
-            StarfishLibContext->Log(SS4S_LogLevelInfo, "SMP",
-                                    "videoRenderQueueThreshold=%d (SS4S_NDL_FRAME_DROP_THRESHOLD=%s, %dx%d)",
-                                    threshold, setting, videoInfo->width, videoInfo->height);
-        } else {
-            StarfishLibContext->Log(SS4S_LogLevelInfo, "SMP",
-                                    "videoRenderQueueThreshold off (SS4S_NDL_FRAME_DROP_THRESHOLD=%s, %dx%d)",
-                                    setting, videoInfo->width, videoInfo->height);
-        }
-    }
     jvalue_ref codec = jobject_create();
     jvalue_ref contents = jobject_create_var(
         jkeyval(J_CSTR_TO_JVAL("codec"), codec),
-        jkeyval(J_CSTR_TO_JVAL("esInfo"), esInfo),
+        jkeyval(J_CSTR_TO_JVAL("esInfo"), jobject_create_var(
+            jkeyval(J_CSTR_TO_JVAL("pauseAtDecodeTime"), jboolean_create(pauseAtDecodeTime)),
+            jkeyval(J_CSTR_TO_JVAL("ptsToDecode"), jnumber_create_i64(0)),
+            jkeyval(J_CSTR_TO_JVAL("seperatedPTS"), jboolean_true()),
+            J_END_OBJ_DECL
+        )),
         jkeyval(J_CSTR_TO_JVAL("format"), J_CSTR_TO_JVAL("RAW")),
         jkeyval(J_CSTR_TO_JVAL("provider"), J_CSTR_TO_JVAL("Chrome")),
         J_END_OBJ_DECL

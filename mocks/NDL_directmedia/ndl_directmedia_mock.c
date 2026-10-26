@@ -21,11 +21,6 @@ static int g_load_completed_delay_ms = -1;
 static bool g_load_completed_fired = false;
 static int g_audio_play_count = 0;
 static int g_video_play_count = 0;
-static int g_load_count = 0;
-static int g_drop_threshold_calls = 0;
-static int g_drop_threshold = -1;
-static bool g_drop_threshold_armed = false;
-static int g_load_drop_threshold = 0;
 
 static pthread_t g_delayed_load_thread;
 static bool g_delayed_load_thread_running = false;
@@ -42,8 +37,6 @@ static void mock_ndl_write_stats_unlocked(void) {
     }
     fprintf(f, "audio_play=%d\nvideo_play=%d\nload_completed=%d\n",
             g_audio_play_count, g_video_play_count, g_load_completed_fired ? 1 : 0);
-    fprintf(f, "load_count=%d\ndrop_threshold_calls=%d\ndrop_threshold=%d\nload_drop_threshold=%d\n",
-            g_load_count, g_drop_threshold_calls, g_drop_threshold, g_load_drop_threshold);
     fclose(f);
 }
 
@@ -77,11 +70,6 @@ void mock_ndl_reset(void) {
     g_load_completed_fired = false;
     g_audio_play_count = 0;
     g_video_play_count = 0;
-    g_load_count = 0;
-    g_drop_threshold_calls = 0;
-    g_drop_threshold = -1;
-    g_drop_threshold_armed = false;
-    g_load_drop_threshold = 0;
     mock_ndl_write_stats_unlocked();
     pthread_mutex_unlock(&mock_state_lock);
 
@@ -155,29 +143,6 @@ void mock_ndl_note_audio_play(void) {
 void mock_ndl_note_video_play(void) {
     pthread_mutex_lock(&mock_state_lock);
     g_video_play_count++;
-    mock_ndl_write_stats_unlocked();
-    pthread_mutex_unlock(&mock_state_lock);
-}
-
-void mock_ndl_note_load(void) {
-    pthread_mutex_lock(&mock_state_lock);
-    g_load_count++;
-    g_load_drop_threshold = g_drop_threshold_armed ? g_drop_threshold : 0;
-    mock_ndl_write_stats_unlocked();
-    pthread_mutex_unlock(&mock_state_lock);
-}
-
-void mock_ndl_note_unload(void) {
-    pthread_mutex_lock(&mock_state_lock);
-    g_drop_threshold_armed = false;
-    pthread_mutex_unlock(&mock_state_lock);
-}
-
-void mock_ndl_note_frame_drop_threshold(int threshold) {
-    pthread_mutex_lock(&mock_state_lock);
-    g_drop_threshold_calls++;
-    g_drop_threshold = threshold;
-    g_drop_threshold_armed = threshold >= 2;
     mock_ndl_write_stats_unlocked();
     pthread_mutex_unlock(&mock_state_lock);
 }

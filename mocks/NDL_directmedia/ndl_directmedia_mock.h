@@ -39,9 +39,5 @@ NDLMediaLoadCallback mock_ndl_load_callback(void);
 /* Used by v1/v2 mock translation units. */
 void mock_ndl_note_audio_play(void);
 void mock_ndl_note_video_play(void);
-/* Like the firmware, a threshold of 2 or more set before a load is copied into it; unload clears it. */
-void mock_ndl_note_load(void);
-void mock_ndl_note_unload(void);
-void mock_ndl_note_frame_drop_threshold(int threshold);
 void mock_ndl_store_load_callback(NDLMediaLoadCallback callback);
 void mock_ndl_maybe_schedule_load_completed(void);
