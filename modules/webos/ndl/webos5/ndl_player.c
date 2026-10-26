@@ -11,6 +11,7 @@
 
 #include "opus_empty.h"
 #include "../../common/aurora_frame_diag.h"
+#include "../../common/frame_drop_threshold.h"
 
 /* pf-webOS NDL v2 load prime (client-webos f93738278 / PR #249). */
 #define NDL_AUDIO_PRIME_BUDGET_MS 500
@@ -723,6 +724,29 @@ static int UnloadMedia(SS4S_PlayerContext *context) {
     return ret;
 }
 
+/* NDL copies the threshold into the next load payload, clears it on unload and ignores values below 2. */
+static void ArmFrameDropThreshold(const SS4S_PlayerContext *context) {
+    const NDL_DIRECTMEDIA_DATA_INFO_T *info = &context->mediaInfo;
+    const char *env;
+    int threshold = SS4S_FrameDropThreshold(info->video.width, info->video.type == NDL_VIDEO_TYPE_AV1, &env);
+    if (info->video.type == 0) {
+        threshold = 0;
+    } else if (threshold > 0 && threshold <= context->renderQueueTarget) {
+        threshold = context->renderQueueTarget + 1;
+    }
+    if (threshold == 0) {
+        SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
+                            "Frame drop threshold off (SS4S_NDL_FRAME_DROP_THRESHOLD=%s, video=%u %dx%d)",
+                            env, info->video.type, info->video.width, info->video.height);
+        return;
+    }
+    int rc = NDL_DirectVideoSetFrameDropThreshold(threshold);
+    SS4S_NDL_webOS5_Log(rc == 0 ? SS4S_LogLevelInfo : SS4S_LogLevelWarn, "NDL",
+                        "NDL_DirectVideoSetFrameDropThreshold(%d) before load rc=%d "
+                        "(SS4S_NDL_FRAME_DROP_THRESHOLD=%s, %dx%d, render target %d)",
+                        threshold, rc, env, info->video.width, info->video.height, context->renderQueueTarget);
+}
+
 static int LoadMedia(SS4S_PlayerContext *context) {
     int ret;
     if (!SS4S_NDL_webOS5_Initialized) {
@@ -747,6 +771,7 @@ static int LoadMedia(SS4S_PlayerContext *context) {
         SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "Defer LoadMedia because audio or video has no type");
         return 0;
     }
+    ArmFrameDropThreshold(context);
     SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL", "NDL_DirectMediaLoad(video=%u (%d*%d), atype=%u)", info.video.type,
                         info.video.width, info.video.height, info.audio.type);
     atomic_store(&context->loadCompleted, false);
@@ -788,18 +813,6 @@ static int LoadMedia(SS4S_PlayerContext *context) {
                             "Video-only load — picture will not be paced against an audio plane");
     }
 
-    /* 4K HEVC at 120 fps can fill NDL's decode queue faster than the panel
-     * drains it (native 3840x2160 vs scaled 3.6K). Drop late frames instead
-     * of letting latency grow without bound. No-op if the API is missing.
-     * HEVC/H.264: only this 4K gate — do not change.
-     * AV1: skip even at 4K. The same threshold at 120 Hz drops ~every other
-     * frame (looks like 60 fps) because AV1 Play() is slower than HEVC. */
-    if (context->mediaInfo.video.width >= 3840 &&
-        context->mediaInfo.video.type != NDL_VIDEO_TYPE_AV1) {
-        int drop_rc = NDL_DirectVideoSetFrameDropThreshold(1);
-        SS4S_NDL_webOS5_Log(SS4S_LogLevelInfo, "NDL",
-                            "4K: NDL_DirectVideoSetFrameDropThreshold(1) rc=%d", drop_rc);
-    }
     AuroraFrameDiagBeginSession("ndl");
     context->smoothPtsInitialized = false;
     context->smoothLastPts = 0;
